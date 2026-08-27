@@ -4,20 +4,34 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   prepare-hermes:
     runs-on: ubuntu-latest
     env:
       HERMES_COMPAT_BASE: ef46ec03e11452eab74e261147668fb64a3d9fd3
+      HERMES_COMPAT_RELEASE: ci-hermes-ef46ec03
+      HERMES_COMPAT_ARCHIVE: hermes-agent-ef46ec03e11452eab74e261147668fb64a3d9fd3.tar.gz
+      HERMES_COMPAT_SHA256: d2004e1f6415d85fb1339e5977f0b45f3bcfad1059a345c16d37c99f65318592
     steps:
       - uses: actions/checkout@v4
-      - name: Check out pinned Hermes source
-        uses: actions/checkout@v4
-        with:
-          repository: NousResearch/hermes-agent
-          ref: ${{ env.HERMES_COMPAT_BASE }}
-          path: hermes-agent
-          persist-credentials: false
+      - name: Download and verify pinned Hermes source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$HERMES_COMPAT_RELEASE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$HERMES_COMPAT_ARCHIVE" \
+            --dir /tmp
+          printf '%s  %s\n' \
+            "$HERMES_COMPAT_SHA256" "/tmp/$HERMES_COMPAT_ARCHIVE" \
+            | sha256sum --check -
+          mkdir hermes-agent
+          tar -xzf "/tmp/$HERMES_COMPAT_ARCHIVE" \
+            --strip-components=1 -C hermes-agent
+          git -C hermes-agent init
       - name: Apply machine-session compatibility patch
         run: git -C hermes-agent apply "$GITHUB_WORKSPACE/patches/hermes-machine-session-hooks.patch"
       - name: Upload patched Hermes source
