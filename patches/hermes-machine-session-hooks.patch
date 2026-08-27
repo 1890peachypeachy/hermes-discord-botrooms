@@ -1,0 +1,297 @@
+diff --git a/tui_gateway/methods_session.py b/tui_gateway/methods_session.py
+index b82c4df..e1c3f65 100644
+--- a/tui_gateway/methods_session.py
++++ b/tui_gateway/methods_session.py
+@@ -33,6 +33,15 @@ def _(rid, params: dict) -> dict:
+         explicit_cwd = False
+     resolved_cwd = _completion_cwd(params)
+     source = _resolve_session_source(str(params.get("source") or "").strip() or None)
++    try:
++        event_subscriptions = _normalize_event_subscriptions(
++            params.get("event_subscriptions")
++        )
++    except ValueError as exc:
++        return _err(rid, 4002, str(exc))
++    system_prompt_append = str(params.get("system_prompt_append") or "").strip()
++    if len(system_prompt_append) > 8000:
++        return _err(rid, 4002, "system_prompt_append exceeds 8000 characters")
+     _enable_gateway_prompts()
+ 
+     # ``profile`` (app-global remote mode): a new chat started under a non-launch
+@@ -85,6 +94,7 @@ def _(rid, params: dict) -> dict:
+             "cols": cols,
+             "created_at": now,
+             "edit_snapshots": {},
++            "event_subscriptions": event_subscriptions,
+             "explicit_cwd": explicit_cwd,
+             "history": history,
+             "history_lock": threading.Lock(),
+@@ -104,6 +114,7 @@ def _(rid, params: dict) -> dict:
+             "session_key": key,
+             "show_reasoning": _load_show_reasoning(),
+             "source": source,
++            "system_prompt_append": system_prompt_append or None,
+             "slash_worker": None,
+             "tool_progress_mode": _load_tool_progress_mode(),
+             "tool_started_at": {},
+@@ -387,6 +398,17 @@ def _(rid, params: dict) -> dict:
+     # route in parallel. Suppress the duplicate WebSocket transcript only when
+     # the caller explicitly requests it; other clients keep upstream behavior.
+     omit_messages = is_truthy_value(params.get("omit_messages", False))
++    event_subscriptions_provided = "event_subscriptions" in params
++    try:
++        event_subscriptions = _normalize_event_subscriptions(
++            params.get("event_subscriptions")
++        )
++    except ValueError as exc:
++        return _err(rid, 4002, str(exc))
++    system_prompt_append = str(params.get("system_prompt_append") or "").strip()
++    system_prompt_append_provided = "system_prompt_append" in params
++    if len(system_prompt_append) > 8000:
++        return _err(rid, 4002, "system_prompt_append exceeds 8000 characters")
+ 
+     # In a profile scope this opens a DEDICATED handle we own until the agent
+     # takes it (see the ownership transfer at _init_session below); every path
+@@ -452,10 +474,25 @@ def _(rid, params: dict) -> dict:
+                 live_sid = _find_live_unpersisted(target, profile_home)
+                 live = _sessions.get(live_sid) if live_sid else None
+                 if live is not None:
++                    if (
++                        system_prompt_append_provided
++                        and live.get("agent") is not None
++                        and live.get("system_prompt_append")
++                        != (system_prompt_append or None)
++                    ):
++                        return _err(
++                            rid,
++                            4002,
++                            "system_prompt_append cannot change on a live session",
++                        )
+                     if owns_db:
+                         with contextlib.suppress(Exception):
+                             db.close()
+                     live["last_active"] = time.time()
++                    if event_subscriptions_provided:
++                        live["event_subscriptions"] = event_subscriptions
++                    if system_prompt_append_provided:
++                        live["system_prompt_append"] = system_prompt_append or None
+                     # This resume reattaches the live record. A lazy session
+                     # (no state.db row yet — every fresh Bot Chat) that was
+                     # sentinel-parked by a WS drop MUST be rebound here, or it
+@@ -629,6 +666,21 @@ def _(rid, params: dict) -> dict:
+                     return _err(rid, 4007, "session no longer live; retry resume")
+                 if session.get("_client_gone_interrupt_requested"):
+                     return _err(rid, 4009, "session disconnect interrupt settling")
++                if (
++                    system_prompt_append_provided
++                    and session.get("agent") is not None
++                    and session.get("system_prompt_append")
++                    != (system_prompt_append or None)
++                ):
++                    return _err(
++                        rid,
++                        4002,
++                        "system_prompt_append cannot change on a live session",
++                    )
++                if event_subscriptions_provided:
++                    session["event_subscriptions"] = event_subscriptions
++                if system_prompt_append_provided:
++                    session["system_prompt_append"] = system_prompt_append or None
+                 # This resume reattaches the live record: cancel any pending
+                 # ws-orphan reap timer armed while the client was detached
+                 # (storm killer — _live_session_payload's rebind also cancels,
+@@ -680,6 +732,8 @@ def _(rid, params: dict) -> dict:
+                 close_on_disconnect=is_truthy_value(params.get("close_on_disconnect", False)),
+                 profile_home=profile_home,
+                 lazy=True,
++                event_subscriptions=event_subscriptions,
++                system_prompt_append=system_prompt_append or None,
+             )
+             if (live := _claim_or_reuse_live(sid, target, record, lease)) is not None:
+                 return _reuse_live_response(*live)
+@@ -748,6 +802,8 @@ def _(rid, params: dict) -> dict:
+                 profile_home=profile_home,
+                 model_override=overrides.get("model_override"),
+                 resume_runtime_overrides=overrides or None,
++                event_subscriptions=event_subscriptions,
++                system_prompt_append=system_prompt_append or None,
+             )
+             record["resume_history_ready"] = threading.Event()
+             record["resume_hydrating"] = True
+@@ -844,6 +900,8 @@ def _(rid, params: dict) -> dict:
+                 profile_home=profile_home,
+                 model_override=overrides.get("model_override"),
+                 resume_runtime_overrides=overrides or None,
++                event_subscriptions=event_subscriptions,
++                system_prompt_append=system_prompt_append or None,
+             )
+             if (live := _claim_or_reuse_live(sid, target, record, lease)) is not None:
+                 return _reuse_live_response(*live)
+@@ -929,6 +987,7 @@ def _(rid, params: dict) -> dict:
+                     session_id=target,
+                     session_db=db,
+                     platform_override=source,
++                    system_prompt_append=system_prompt_append or None,
+                     **stored_runtime_overrides,
+                 )
+             finally:
+@@ -978,6 +1037,8 @@ def _(rid, params: dict) -> dict:
+                         cwd=profile_resume_cwd,
+                         session_db=db,
+                         source=source,
++                        event_subscriptions=event_subscriptions,
++                        system_prompt_append=system_prompt_append or None,
+                     )
+                     # Ownership TRANSFER — the registered session's agent now
+                     # holds this handle for its whole life, and _init_session
+@@ -3273,6 +3334,7 @@ def _(rid, params: dict) -> dict:
+                     session_id=new_key,
+                     session_db=branch_db,
+                     platform_override=source,
++                    system_prompt_append=session.get("system_prompt_append"),
+                 )
+             finally:
+                 _clear_session_context(tokens)
+@@ -3286,6 +3348,8 @@ def _(rid, params: dict) -> dict:
+                 session_db=branch_db,
+                 source=source,
+                 profile_home=parent_home,
++                event_subscriptions=session.get("event_subscriptions", frozenset()),
++                system_prompt_append=session.get("system_prompt_append"),
+             )
+             # Ownership TRANSFER — the branched session's agent holds this
+             # handle for its whole life and closes it on teardown. Drop is
+diff --git a/tui_gateway/server.py b/tui_gateway/server.py
+index 4d4a56e..d441a7a 100644
+--- a/tui_gateway/server.py
++++ b/tui_gateway/server.py
+@@ -2733,6 +2733,8 @@ def _start_agent_build(sid: str, session: dict) -> None:
+                 if resume_sid := current.get("resume_session_id"):
+                     kw["session_id"] = resume_sid
+                 kw["platform_override"] = _session_source(current)
++                if prompt_append := current.get("system_prompt_append"):
++                    kw["system_prompt_append"] = prompt_append
+                 resume_overrides = current.get("resume_runtime_overrides")
+                 if isinstance(resume_overrides, dict) and resume_overrides:
+                     # Cold deferred resume: restore the full persisted runtime
+@@ -5395,11 +5397,42 @@ def _session_tool_progress_mode(sid: str) -> str:
+     return str(_sessions.get(sid, {}).get("tool_progress_mode", "all") or "all")
+ 
+ 
++# Public contract for trusted machine clients. Increment only for a breaking
++# schema or lifecycle change; standalone integrations feature-detect this.
++MACHINE_SESSION_HOOKS_VERSION = 1
++_SUPPORTED_EVENT_SUBSCRIPTIONS = frozenset({"tool_lifecycle"})
++
++
++def _normalize_event_subscriptions(value) -> frozenset[str]:
++    """Validate opt-in machine event families for one client session."""
++
++    if value in (None, ""):
++        return frozenset()
++    if not isinstance(value, (list, tuple, set, frozenset)):
++        raise ValueError("event_subscriptions must be a list of strings")
++    if any(not isinstance(item, str) for item in value):
++        raise ValueError("event_subscriptions must be a list of strings")
++    normalized = frozenset(
++        item.strip().lower() for item in value if item.strip()
++    )
++    unknown = normalized - _SUPPORTED_EVENT_SUBSCRIPTIONS
++    if unknown:
++        raise ValueError(
++            "unsupported event_subscriptions: " + ", ".join(sorted(unknown))
++        )
++    return normalized
++
++
+ def _session_verbose(sid: str) -> bool:
+     return _session_tool_progress_mode(sid) == "verbose"
+ 
+ 
+ def _tool_progress_enabled(sid: str) -> bool:
++    session = _sessions.get(sid, {})
++    if "tool_lifecycle" in session.get("event_subscriptions", ()):
++        # Machine consumers such as schedulers need the authoritative start /
++        # complete pair even when the human-facing progress display is off.
++        return True
+     return _session_tool_progress_mode(sid) != "off"
+ 
+ 
+@@ -5757,6 +5790,7 @@ def _sync_bot_capabilities(sid: str, session: dict) -> None:
+                 session["session_key"],
+                 session_id=session["session_key"],
+                 platform_override=_session_source(session),
++                system_prompt_append=session.get("system_prompt_append"),
+             )
+         finally:
+             _clear_session_context(tokens)
+@@ -7456,6 +7490,7 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
+             session["session_key"],
+             session_id=session["session_key"],
+             platform_override=_session_source(session),
++            system_prompt_append=session.get("system_prompt_append"),
+         )
+     finally:
+         _clear_session_context(tokens)
+@@ -7626,6 +7661,7 @@ def _make_agent(
+     reasoning_config_override: dict | None = None,
+     service_tier_override: str | None = None,
+     platform_override: str | None = None,
++    system_prompt_append: str | None = None,
+ ):
+     # AC-4 test seam: dead unless explicitly armed by the isolated certify
+     # harness. Both inline and compute-host paths construct through _make_agent,
+@@ -7661,6 +7697,10 @@ def _make_agent(
+     from hermes_cli.config import resolve_ephemeral_system_prompt_from_config
+ 
+     system_prompt = resolve_ephemeral_system_prompt_from_config(cfg)
++    if system_prompt_append:
++        system_prompt = "\n\n".join(
++            part for part in (system_prompt, system_prompt_append) if part
++        ).strip()
+     startup_skills = _parse_tui_skills_env()
+     if startup_skills:
+         from agent.skill_commands import build_preloaded_skills_prompt
+@@ -7814,6 +7854,8 @@ def _init_session(
+     session_db=None,
+     source: str | None = None,
+     profile_home: str | None = None,
++    event_subscriptions: frozenset[str] = frozenset(),
++    system_prompt_append: str | None = None,
+ ):
+     now = time.time()
+     with _sessions_lock:
+@@ -7834,6 +7876,8 @@ def _init_session(
+             "slash_worker": None,
+             "show_reasoning": _load_show_reasoning(),
+             "source": _resolve_session_source(source),
++            "event_subscriptions": event_subscriptions,
++            "system_prompt_append": system_prompt_append,
+             "tool_progress_mode": _load_tool_progress_mode(),
+             "edit_snapshots": {},
+             "tool_started_at": {},
+@@ -9212,6 +9256,8 @@ def _deferred_session_record(
+     lazy: bool = False,
+     model_override=None,
+     resume_runtime_overrides: dict | None = None,
++    event_subscriptions: frozenset[str] = frozenset(),
++    system_prompt_append: str | None = None,
+ ) -> dict:
+     """A live-session record whose AIAgent is built later (lazy watch / cold
+     resume) — _init_session's shape minus the agent."""
+@@ -9228,6 +9274,7 @@ def _deferred_session_record(
+         "cwd": cwd,
+         "display_history_prefix": display_history_prefix or [],
+         "edit_snapshots": {},
++        "event_subscriptions": event_subscriptions,
+         "explicit_cwd": False,
+         "history": history,
+         "history_lock": threading.Lock(),
+@@ -9246,6 +9293,7 @@ def _deferred_session_record(
+         "show_reasoning": _load_show_reasoning(),
+         "slash_worker": None,
+         "source": source,
++        "system_prompt_append": system_prompt_append,
+         "tool_progress_mode": _load_tool_progress_mode(),
+         "tool_started_at": {},
+         "transport": current_transport() or _stdio_transport,

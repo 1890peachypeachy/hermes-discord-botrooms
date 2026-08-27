@@ -1,0 +1,6 @@
+This project contains code adapted from Hermes Agent, licensed under the MIT
+License and copyright Nous Research. The room scheduler, persistence layer,
+profile worker, and Discord delivery behavior preserve that attribution.
+
+Hermes Agent is a separate project. This repository is an independently
+distributed plugin and is not an official Nous Research release.
