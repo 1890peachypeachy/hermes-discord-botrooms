@@ -12,6 +12,7 @@ jobs:
         python-version: ["3.11", "3.12", "3.13"]
     env:
       HERMES_COMPAT_BASE: ef46ec03e11452eab74e261147668fb64a3d9fd3
+      GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -20,10 +21,15 @@ jobs:
       - name: Install Hermes and test dependencies
         run: |
           python -m pip install --upgrade pip
-          git init /tmp/hermes-agent
-          git -C /tmp/hermes-agent remote add origin https://github.com/NousResearch/hermes-agent.git
-          git -C /tmp/hermes-agent fetch --depth 1 origin "$HERMES_COMPAT_BASE"
-          git -C /tmp/hermes-agent checkout --detach FETCH_HEAD
+          curl --fail --location --retry 5 --retry-all-errors \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/NousResearch/hermes-agent/tarball/$HERMES_COMPAT_BASE" \
+            --output /tmp/hermes-agent.tar.gz
+          mkdir /tmp/hermes-agent
+          tar -xzf /tmp/hermes-agent.tar.gz --strip-components=1 -C /tmp/hermes-agent
+          git -C /tmp/hermes-agent init
           git -C /tmp/hermes-agent apply "$GITHUB_WORKSPACE/patches/hermes-machine-session-hooks.patch"
           python -m pip install -e "/tmp/hermes-agent[messaging]"
           python -m pip install -e . pytest pytest-asyncio ruff
