@@ -5,33 +5,53 @@ on:
   pull_request:
 
 jobs:
+  prepare-hermes:
+    runs-on: ubuntu-latest
+    env:
+      HERMES_COMPAT_BASE: ef46ec03e11452eab74e261147668fb64a3d9fd3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out pinned Hermes source
+        uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ env.HERMES_COMPAT_BASE }}
+          path: hermes-agent
+          persist-credentials: false
+      - name: Apply machine-session compatibility patch
+        run: git -C hermes-agent apply "$GITHUB_WORKSPACE/patches/hermes-machine-session-hooks.patch"
+      - name: Upload patched Hermes source
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-${{ env.HERMES_COMPAT_BASE }}
+          path: hermes-agent
+          if-no-files-found: error
+          retention-days: 1
+
   test:
+    needs: prepare-hermes
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     env:
       HERMES_COMPAT_BASE: ef46ec03e11452eab74e261147668fb64a3d9fd3
-      GITHUB_TOKEN: ${{ github.token }}
+      HERMES_DIR: /tmp/hermes-agent
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Download patched Hermes source
+        uses: actions/download-artifact@v4
+        with:
+          name: hermes-${{ env.HERMES_COMPAT_BASE }}
+          path: ${{ env.HERMES_DIR }}
       - name: Install Hermes and test dependencies
         run: |
           python -m pip install --upgrade pip
-          curl --fail --location --retry 5 --retry-all-errors \
-            --header "Authorization: Bearer $GITHUB_TOKEN" \
-            --header "Accept: application/vnd.github+json" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/NousResearch/hermes-agent/tarball/$HERMES_COMPAT_BASE" \
-            --output /tmp/hermes-agent.tar.gz
-          mkdir /tmp/hermes-agent
-          tar -xzf /tmp/hermes-agent.tar.gz --strip-components=1 -C /tmp/hermes-agent
-          git -C /tmp/hermes-agent init
-          git -C /tmp/hermes-agent apply "$GITHUB_WORKSPACE/patches/hermes-machine-session-hooks.patch"
-          python -m pip install -e "/tmp/hermes-agent[messaging]"
+          python -m pip install -e "${HERMES_DIR}[messaging]"
           python -m pip install -e . pytest pytest-asyncio ruff
       - name: Lint
         run: ruff check .
@@ -39,7 +59,7 @@ jobs:
         run: python -m pytest
       - name: Test Hermes session-hook regressions
         run: |
-          cd /tmp/hermes-agent
+          cd "$HERMES_DIR"
           python -m pytest -q tests/test_tui_gateway_server.py \
             -k "session_create or session_resume or tool_progress or reset_session_agent"
       - name: Validate plugin manifest and imports
