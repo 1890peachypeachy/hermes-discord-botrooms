@@ -13,6 +13,22 @@ from hermes_discord_botrooms.bot_mode.config import (
 
 
 @pytest.mark.asyncio
+async def test_connect_forwards_gateway_reconnect_flag(monkeypatch):
+    calls = []
+
+    async def connect(_self, *, is_reconnect=False):
+        calls.append(is_reconnect)
+        return True
+
+    monkeypatch.setattr(adapter_module.base.DiscordAdapter, "connect", connect)
+    instance = object.__new__(BotRoomsDiscordAdapter)
+    instance._ensure_botrooms_subscription = lambda: calls.append("subscribed")
+
+    assert await instance.connect(is_reconnect=True) is True
+    assert calls == [True, "subscribed"]
+
+
+@pytest.mark.asyncio
 async def test_room_answer_restarts_typing_before_releasing_agent(monkeypatch):
     events = []
     room = BotRoomConfig(

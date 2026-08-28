@@ -37,8 +37,8 @@ class BotRoomsDiscordAdapter(base.DiscordAdapter):
         self._botrooms_recovery_task: asyncio.Task | None = None
         self._botrooms_registry_cache = {}
 
-    async def connect(self) -> bool:
-        connected = await super().connect()
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
+        connected = await super().connect(is_reconnect=is_reconnect)
         if connected:
             self._ensure_botrooms_subscription()
         return connected
