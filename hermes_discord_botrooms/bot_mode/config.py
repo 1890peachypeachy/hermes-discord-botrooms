@@ -132,10 +132,16 @@ def _room_from_raw(raw: Any) -> BotRoomConfig:
     controller = str(raw.get("controller_profile") or "default").strip()
     if not room_id:
         raise BotRoomConfigError("room_id is required")
-    if platform not in {"desktop", "discord"}:
-        raise BotRoomConfigError(f"room {room_id!r}: platform must be desktop or discord")
+    if platform not in {"desktop", "discord", "mattermost"}:
+        raise BotRoomConfigError(
+            f"room {room_id!r}: platform must be desktop, discord, or mattermost"
+        )
     if platform == "discord" and not channel_id:
         raise BotRoomConfigError(f"room {room_id!r}: channel_id is required for Discord")
+    if platform == "mattermost" and not channel_id:
+        raise BotRoomConfigError(
+            f"room {room_id!r}: channel_id is required for Mattermost"
+        )
     members = tuple(_member_from_raw(item) for item in (raw.get("members") or []))
     if not MIN_ROOM_MEMBERS <= len(members) <= MAX_ROOM_MEMBERS:
         raise BotRoomConfigError(
