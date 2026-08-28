@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import Any, Iterator, Sequence
 
 from .config import BotRoomConfig, bot_room_from_mapping
-from .models import PendingPrompt, RoomAttachment, RoomEvent, SubmittedRun
-from .prompts import apply_hold_directive
+from .models import AgentEventCommit, PendingPrompt, RoomAttachment, RoomEvent, SubmittedRun
+from .prompts import DUPLICATE_WINDOW_SECONDS, apply_hold_directive
 
 # The v2-named ledgers below are additive tables. Keep the compatibility
 # marker at 1 so rolling the executable back simply ignores them instead of
@@ -464,11 +464,8 @@ class RoomStore:
         self, room_id: str, thread_id: str, member_key: str, event_id: int
     ) -> None:
         with self.transaction() as db:
-            db.execute(
-                "INSERT INTO bot_room_watermarks(room_id,thread_id,member_key,event_id,updated_at) "
-                "VALUES(?,?,?,?,?) ON CONFLICT(room_id,thread_id,member_key) DO UPDATE SET "
-                "event_id=MAX(event_id,excluded.event_id),updated_at=excluded.updated_at",
-                (room_id, thread_id, member_key, int(event_id), time.time()),
+            self._advance_watermark_in_transaction(
+                db, room_id, thread_id, member_key, event_id, time.time()
             )
 
     def append_agent_event(
@@ -485,39 +482,157 @@ class RoomStore:
     ) -> RoomEvent:
         now = time.time()
         with self.transaction() as db:
-            cursor = db.execute(
-                "INSERT OR IGNORE INTO bot_room_events(event_uid,room_id,thread_id,run_id,kind,"
-                "author_kind,author_id,author_name,text,attachments_json,metadata_json,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,'[]',?,?)",
-                (
-                    event_uid,
-                    room_id,
-                    thread_id,
-                    run_id,
-                    "message",
-                    "member",
-                    member_key,
-                    member_name,
-                    text.strip(),
-                    _json(metadata or {}),
-                    now,
-                ),
+            commit = self._append_agent_event_in_transaction(
+                db,
+                now=now,
+                room_id=room_id,
+                thread_id=thread_id,
+                run_id=run_id,
+                member_key=member_key,
+                member_name=member_name,
+                text=text,
+                event_uid=event_uid,
+                metadata=metadata,
             )
-            inserted = cursor.rowcount > 0
-            event_id = int(cursor.lastrowid or 0) if inserted else 0
-            if not inserted:
-                event_id = int(
-                    db.execute(
-                        "SELECT id FROM bot_room_events WHERE event_uid=?", (event_uid,)
-                    ).fetchone()["id"]
+        if commit.event is None:
+            raise RuntimeError(f"agent event append failed with status {commit.status}")
+        return commit.event
+
+    def commit_agent_event(
+        self,
+        *,
+        room_id: str,
+        thread_id: str,
+        run_id: str,
+        member_key: str,
+        member_name: str,
+        text: str,
+        event_uid: str,
+        dispatch_epoch: int,
+        anchor_id: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> AgentEventCommit:
+        """Atomically validate and persist a completed member turn."""
+
+        now = time.time()
+        with self.transaction() as db:
+            run = db.execute(
+                "SELECT status,stop_requested FROM bot_room_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if not run or run["status"] == "superseded":
+                return AgentEventCommit("superseded")
+            if run["stop_requested"] or run["status"] in {"stopping", "stopped"}:
+                return AgentEventCommit("stopped")
+            room = db.execute(
+                "SELECT epoch FROM bot_rooms WHERE room_id=?", (room_id,)
+            ).fetchone()
+            current_epoch = int(room["epoch"] if room else 0)
+            if current_epoch != dispatch_epoch:
+                newer_user = db.execute(
+                    "SELECT 1 FROM bot_room_events WHERE room_id=? AND thread_id=? "
+                    "AND author_kind='user' AND id>? LIMIT 1",
+                    (room_id, thread_id, int(anchor_id)),
+                ).fetchone()
+                if newer_user:
+                    return AgentEventCommit("superseded")
+            self._advance_watermark_in_transaction(
+                db, room_id, thread_id, member_key, anchor_id, now
+            )
+            commit = self._append_agent_event_in_transaction(
+                db,
+                now=now,
+                room_id=room_id,
+                thread_id=thread_id,
+                run_id=run_id,
+                member_key=member_key,
+                member_name=member_name,
+                text=text,
+                event_uid=event_uid,
+                metadata=metadata,
+            )
+            if commit.event is not None:
+                self._advance_watermark_in_transaction(
+                    db, room_id, thread_id, member_key, commit.event.id, now
                 )
-            if inserted:
-                db.execute(
-                    "UPDATE bot_room_runs SET message_count=message_count+1,updated_at=? WHERE run_id=?",
-                    (now, run_id),
-                )
-            row = db.execute("SELECT * FROM bot_room_events WHERE id=?", (event_id,)).fetchone()
-        return self._event(row)
+            return commit
+
+    def _append_agent_event_in_transaction(
+        self,
+        db: sqlite3.Connection,
+        *,
+        now: float,
+        room_id: str,
+        thread_id: str,
+        run_id: str,
+        member_key: str,
+        member_name: str,
+        text: str,
+        event_uid: str,
+        metadata: dict[str, Any] | None,
+    ) -> AgentEventCommit:
+        existing = db.execute(
+            "SELECT * FROM bot_room_events WHERE event_uid=?", (event_uid,)
+        ).fetchone()
+        if existing:
+            return AgentEventCommit("idempotent", self._event(existing))
+        normalized_text = text.strip()
+        normalized_metadata = metadata or {}
+        prior = db.execute(
+            "SELECT * FROM bot_room_events WHERE room_id=? AND kind='message' "
+            "ORDER BY id DESC LIMIT 1",
+            (room_id,),
+        ).fetchone()
+        if prior and (
+            prior["author_kind"] == "member"
+            and prior["author_id"] == member_key
+            and prior["thread_id"] == thread_id
+            and prior["text"] == normalized_text
+            and now - float(prior["created_at"] or 0) <= DUPLICATE_WINDOW_SECONDS
+            and str(json.loads(prior["metadata_json"] or "{}").get("source") or "")
+            == str(normalized_metadata.get("source") or "")
+        ):
+            return AgentEventCommit("duplicate", self._event(prior))
+        cursor = db.execute(
+            "INSERT INTO bot_room_events(event_uid,room_id,thread_id,run_id,kind,"
+            "author_kind,author_id,author_name,text,attachments_json,metadata_json,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,'[]',?,?)",
+            (
+                event_uid,
+                room_id,
+                thread_id,
+                run_id,
+                "message",
+                "member",
+                member_key,
+                member_name,
+                normalized_text,
+                _json(normalized_metadata),
+                now,
+            ),
+        )
+        event_id = int(cursor.lastrowid)
+        db.execute(
+            "UPDATE bot_room_runs SET message_count=message_count+1,updated_at=? WHERE run_id=?",
+            (now, run_id),
+        )
+        row = db.execute("SELECT * FROM bot_room_events WHERE id=?", (event_id,)).fetchone()
+        return AgentEventCommit("inserted", self._event(row))
+
+    @staticmethod
+    def _advance_watermark_in_transaction(
+        db: sqlite3.Connection,
+        room_id: str,
+        thread_id: str,
+        member_key: str,
+        event_id: int,
+        now: float,
+    ) -> None:
+        db.execute(
+            "INSERT INTO bot_room_watermarks(room_id,thread_id,member_key,event_id,updated_at) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(room_id,thread_id,member_key) DO UPDATE SET "
+            "event_id=MAX(event_id,excluded.event_id),updated_at=excluded.updated_at",
+            (room_id, thread_id, member_key, int(event_id), now),
+        )
 
     def room_epoch(self, room_id: str) -> int:
         with self.read() as db:
@@ -613,7 +728,12 @@ class RoomStore:
                     (now, run_id),
                 )
 
-    def request_stop(self, room_id: str, thread_id: str = "") -> dict[str, Any] | None:
+    def request_stop(
+        self,
+        room_id: str,
+        thread_id: str = "",
+        member_keys: Sequence[str] = (),
+    ) -> dict[str, Any] | None:
         now = time.time()
         with self.transaction() as db:
             sql = (
@@ -625,6 +745,15 @@ class RoomStore:
             row = db.execute(sql, args).fetchone()
             if not row:
                 return None
+            room = db.execute(
+                "SELECT holds_json FROM bot_rooms WHERE room_id=?", (room_id,)
+            ).fetchone()
+            holds = set(json.loads(room["holds_json"] or "[]")) if room else set()
+            holds.update(str(key) for key in member_keys if key)
+            db.execute(
+                "UPDATE bot_rooms SET epoch=epoch+1,holds_json=?,updated_at=? WHERE room_id=?",
+                (_json(sorted(holds)), now, room_id),
+            )
             db.execute(
                 "UPDATE bot_room_runs SET stop_requested=1,status='stopping',updated_at=? WHERE run_id=?",
                 (now, row["run_id"]),

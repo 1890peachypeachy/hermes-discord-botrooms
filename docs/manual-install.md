@@ -8,7 +8,7 @@ from the environment where `hermes` is installed.
 - Python 3.11–3.13 on macOS or Linux
 - an existing Hermes installation
 - 2–6 existing local Hermes profiles
-- Git access to this private repository
+- Git access to this repository
 - one configured Discord bot identity per participating profile
 - `aiohttp>=3.9,<4` and `PyYAML>=6,<7` in the Hermes Python environment
 

@@ -1,0 +1,34 @@
+{
+  "repository": "NousResearch/hermes-agent",
+  "reference_commit": "e078b2fe7c02ae08902704f573e64ab68d57a70f",
+  "source_path": "apps/desktop/src/plugins/hermes-bots/plugin.js",
+  "source_sha256": "d919e87f5a790e566100fb0e1f99d3f40e2449803035c57e9679ff3a4a560243",
+  "source_last_commit": "7c910793bf44a3973f2afb1a7c1c3342f61417b0",
+  "start_marker": "// ── group chats: bounded round-robin coordination",
+  "end_marker": "function singleFlight(",
+  "coordination_sha256": "9b8ad8f8a8ac399e9a1956ebff63986a796e480f5d6c6c126a2be0dedce574a9",
+  "limits": {
+    "members": 6,
+    "rounds": 3,
+    "messages": 10,
+    "continuations": 2,
+    "history": 24
+  },
+  "tracked_behaviors": [
+    "deterministic mention routing",
+    "serial bounded rounds",
+    "substantive terminal reply selection",
+    "unresolved handoff continuations",
+    "persistent member holds",
+    "empty sentinel normalization",
+    "adjacent duplicate member echo suppression",
+    "honest capped versus settled outcomes"
+  ],
+  "intentional_divergences": [
+    "SQLite durability and idempotent Discord delivery",
+    "Discord typing, attachments, and approval relay",
+    "immediate interruption of superseded and timed-out work",
+    "room-only Agent Inbox restriction",
+    "no Desktop UI or cross-machine room synchronization"
+  ]
+}

@@ -3,9 +3,11 @@ from hermes_discord_botrooms.bot_mode.models import RoomEvent
 from hermes_discord_botrooms.bot_mode.prompts import (
     apply_hold_directive,
     is_pass_text,
+    normalize_room_text,
     parse_mentions,
     resolve_responders,
     should_commit_turn,
+    unaddressed_mentions,
 )
 
 MEMBERS = (
@@ -75,3 +77,19 @@ def test_holds_are_room_scoped_and_direct_address_releases():
 def test_stale_cross_thread_result_can_commit_but_same_thread_result_cannot():
     assert not should_commit_turn(1, 2, newer_user_in_thread=True)
     assert should_commit_turn(1, 2, newer_user_in_thread=False)
+
+
+def test_empty_terminal_sentinel_is_never_exposed_as_bot_text():
+    assert normalize_room_text(" (empty) ").startswith("⚠️ The model returned no response")
+    assert normalize_room_text("ordinary answer") == "ordinary answer"
+
+
+def test_unaddressed_mentions_follow_event_order_and_ignore_self_mentions():
+    unanswered = [
+        _event(1, "user", "start"),
+        _event(2, "member", "@coder please verify; @researcher note to self"),
+    ]
+    assert unaddressed_mentions(unanswered, MEMBERS) == ["coder"]
+
+    answered = [*unanswered, RoomEvent(**{**unanswered[-1].__dict__, "id": 3, "author_id": "coder", "text": "done"})]
+    assert unaddressed_mentions(answered, MEMBERS) == []

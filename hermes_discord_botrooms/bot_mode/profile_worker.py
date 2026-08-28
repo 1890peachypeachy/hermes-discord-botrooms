@@ -22,7 +22,7 @@ from hermes_constants import get_default_hermes_root
 
 from .config import BotRoomConfig, BotRoomMember, profile_home
 from .models import MemberTurnResult, PendingPrompt, RoomAttachment
-from .prompts import ROOM_PROTOCOL_VERSION, room_system_instructions
+from .prompts import ROOM_PROTOCOL_VERSION, is_pass_text, room_system_instructions
 from .store import RoomStore
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,37 @@ def _history_row_id(message: dict[str, Any]) -> int:
         return max(0, int(message.get("row_id") or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _history_text(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                parts.append(str(part.get("text") or ""))
+        return "".join(parts).strip()
+    return str(message.get("text") or "").strip()
+
+
+def _pick_turn_reply(messages: list[dict[str, Any]], baseline_row_id: int) -> str | None:
+    """Prefer the newest substantive assistant answer over a trailing pass."""
+
+    pass_text: str | None = None
+    for message in reversed(messages):
+        if _history_row_id(message) <= baseline_row_id or message.get("role") != "assistant":
+            continue
+        text = _history_text(message)
+        if is_pass_text(text):
+            if pass_text is None:
+                pass_text = text
+            continue
+        return text
+    return pass_text
 
 
 class RpcError(RuntimeError):
@@ -542,6 +573,7 @@ class ProfileWorkerExecutor:
                 room, member, resume_hint
             )
             auto_continuing = bool(recovering and session_result.get("auto_continue"))
+            baseline_row_id = int((attempt or {}).get("baseline_row_id") or 0)
             if recovering and attempt is not None and not auto_continuing:
                 reconciled = await self._reconcile_recovered_attempt(
                     worker=worker,
@@ -692,6 +724,16 @@ class ProfileWorkerExecutor:
                     text = str(payload.get("text") or "").strip()
                     status = str(payload.get("status") or "complete")
                     error = str(payload.get("error") or "")
+                    try:
+                        history = await self._session_history(worker, runtime)
+                        selected = _pick_turn_reply(history, baseline_row_id)
+                        if selected is not None:
+                            text = selected
+                    except Exception:
+                        logger.warning(
+                            "Bot Mode could not refresh terminal history; using event text",
+                            exc_info=True,
+                        )
                     await self._store_call(
                         self._room_store.save_turn_result,
                         run_id,

@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,15 @@ from .configuration import (
 
 _ROOM_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _CREDENTIAL_URL_RE = re.compile(r"((?:https?|ssh)://)[^/\s@]+@", re.IGNORECASE)
+
+
+def _hermes_command(profile: str = "default") -> list[str]:
+    """Use the Hermes module from the Python runtime that loaded this plugin."""
+
+    command = [sys.executable, "-m", "hermes_cli.main"]
+    if profile != "default":
+        command.extend(["--profile", profile])
+    return command
 
 
 def register_cli(parser: argparse.ArgumentParser) -> None:
@@ -256,15 +266,11 @@ def _install_commands(
         if installed_source == source and installed_revision == revision and plugin_path.is_dir():
             if _profile_plugin_enabled(root, profile):
                 continue
-            command = ["hermes"]
-            if profile != "default":
-                command.extend(["--profile", profile])
+            command = _hermes_command(profile)
             command.extend(["plugins", "enable", PLUGIN_KEY, "--no-allow-tool-override"])
             commands.append(command)
             continue
-        command = ["hermes"]
-        if profile != "default":
-            command.extend(["--profile", profile])
+        command = _hermes_command(profile)
         command.extend(
             [
                 "plugins",
@@ -283,9 +289,7 @@ def _install_commands(
 def _restart_commands(profiles: list[str]) -> list[list[str]]:
     result: list[list[str]] = []
     for profile in profiles:
-        command = ["hermes"]
-        if profile != "default":
-            command.extend(["--profile", profile])
+        command = _hermes_command(profile)
         command.extend(["gateway", "restart"])
         result.append(command)
     return result
@@ -662,9 +666,7 @@ def _uninstall(args: argparse.Namespace) -> int:
     for profile in profiles:
         if not (profile_home(root, profile) / "plugins" / PLUGIN_KEY).is_dir():
             continue
-        prefix = ["hermes"]
-        if profile != "default":
-            prefix.extend(["--profile", profile])
+        prefix = _hermes_command(profile)
         if _profile_plugin_enabled(root, profile):
             commands.append([*prefix, "plugins", "disable", PLUGIN_KEY])
         commands.append([*prefix, "plugins", "remove", PLUGIN_KEY])

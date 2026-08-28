@@ -133,6 +133,113 @@ def test_agent_event_replay_does_not_double_count_the_run(tmp_path: Path):
     assert store.run_row(submitted.run_id)["message_count"] == 1
 
 
+def test_adjacent_member_echo_is_suppressed_but_source_changes_are_not(tmp_path: Path):
+    store = RoomStore(tmp_path)
+    submitted = store.submit_user_event(
+        _room(),
+        thread_id="t1",
+        event_uid="discord:echo",
+        text="hello",
+        author_id="user",
+        author_name="You",
+    )
+    base = {
+        "room_id": "agents",
+        "thread_id": "t1",
+        "run_id": submitted.run_id,
+        "member_key": "coder",
+        "member_name": "Coder",
+        "text": "same answer",
+    }
+    first = store.append_agent_event(**base, event_uid="agent:echo:1", metadata={"source": "a"})
+    duplicate = store.append_agent_event(
+        **base, event_uid="agent:echo:2", metadata={"source": "a"}
+    )
+    distinct = store.append_agent_event(
+        **base, event_uid="agent:echo:3", metadata={"source": "b"}
+    )
+    assert duplicate.id == first.id
+    assert distinct.id != first.id
+    assert store.run_row(submitted.run_id)["message_count"] == 2
+
+
+def test_stop_bumps_epoch_and_holds_every_room_member(tmp_path: Path):
+    store = RoomStore(tmp_path)
+    submitted = store.submit_user_event(
+        _room(),
+        thread_id="t1",
+        event_uid="discord:stop",
+        text="work",
+        author_id="user",
+        author_name="You",
+    )
+    before = store.room_epoch("agents")
+    stopped = store.request_stop("agents", "t1", ["default", "coder"])
+    assert stopped and stopped["run_id"] == submitted.run_id
+    assert store.room_epoch("agents") == before + 1
+    assert store.holds("agents") == {"default", "coder"}
+    assert store.run_row(submitted.run_id)["status"] == "stopping"
+
+
+def test_atomic_agent_commit_rechecks_stop_and_newer_user_state(tmp_path: Path):
+    store = RoomStore(tmp_path)
+    room = _room()
+    stopped_run = store.submit_user_event(
+        room,
+        thread_id="t1",
+        event_uid="discord:atomic-1",
+        text="first",
+        author_id="user",
+        author_name="You",
+    )
+    anchor = stopped_run.event_id
+    epoch = store.room_epoch("agents")
+    store.request_stop("agents", "t1", ["default", "coder"])
+    stopped = store.commit_agent_event(
+        room_id="agents",
+        thread_id="t1",
+        run_id=stopped_run.run_id,
+        member_key="coder",
+        member_name="Coder",
+        text="stale",
+        event_uid="agent:atomic:stopped",
+        dispatch_epoch=epoch,
+        anchor_id=anchor,
+    )
+    assert stopped.status == "stopped"
+
+    old_run = store.submit_user_event(
+        room,
+        thread_id="t1",
+        event_uid="discord:atomic-2",
+        text="second",
+        author_id="user",
+        author_name="You",
+    )
+    old_epoch = store.room_epoch("agents")
+    store.submit_user_event(
+        room,
+        thread_id="t1",
+        event_uid="discord:atomic-3",
+        text="newer",
+        author_id="user",
+        author_name="You",
+    )
+    superseded = store.commit_agent_event(
+        room_id="agents",
+        thread_id="t1",
+        run_id=old_run.run_id,
+        member_key="coder",
+        member_name="Coder",
+        text="stale",
+        event_uid="agent:atomic:superseded",
+        dispatch_epoch=old_epoch,
+        anchor_id=old_run.event_id,
+    )
+    assert superseded.status == "superseded"
+    assert "stale" not in [event.text for event in store.thread_events("agents", "t1")]
+
+
 def test_recovery_and_delivery_queries_only_return_unfinished_work(tmp_path: Path):
     store = RoomStore(tmp_path)
     room = _room()

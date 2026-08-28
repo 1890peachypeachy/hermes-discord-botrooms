@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 from pathlib import Path
 
 import yaml
@@ -87,8 +88,8 @@ def test_setup_dry_run_is_non_mutating_and_uses_arbitrary_profiles(tmp_path: Pat
     ]
     assert all("reviewer" not in command for command in captured["install_commands"])
     assert captured["restart_commands"] == [
-        "hermes --profile planner gateway restart",
-        "hermes --profile builder gateway restart",
+        f"{sys.executable} -m hermes_cli.main --profile planner gateway restart",
+        f"{sys.executable} -m hermes_cli.main --profile builder gateway restart",
     ]
 
 
@@ -125,7 +126,9 @@ def test_matching_but_disabled_profile_is_reenabled(tmp_path: Path):
 
     assert cli._install_commands(tmp_path, ["planner"], source, revision) == [
         [
-            "hermes",
+            sys.executable,
+            "-m",
+            "hermes_cli.main",
             "--profile",
             "planner",
             "plugins",
@@ -208,10 +211,10 @@ def test_uninstall_uses_supported_disable_and_remove_commands(tmp_path: Path, mo
 
     assert all("--yes" not in command for command in commands)
     assert commands == [
-        ["hermes", "--profile", "builder", "plugins", "disable", PLUGIN_KEY],
-        ["hermes", "--profile", "builder", "plugins", "remove", PLUGIN_KEY],
-        ["hermes", "--profile", "planner", "plugins", "disable", PLUGIN_KEY],
-        ["hermes", "--profile", "planner", "plugins", "remove", PLUGIN_KEY],
+        [sys.executable, "-m", "hermes_cli.main", "--profile", "builder", "plugins", "disable", PLUGIN_KEY],
+        [sys.executable, "-m", "hermes_cli.main", "--profile", "builder", "plugins", "remove", PLUGIN_KEY],
+        [sys.executable, "-m", "hermes_cli.main", "--profile", "planner", "plugins", "disable", PLUGIN_KEY],
+        [sys.executable, "-m", "hermes_cli.main", "--profile", "planner", "plugins", "remove", PLUGIN_KEY],
     ]
     assert cli.configured_rooms(cli.read_config(tmp_path)) == []
     assert cli.read_config(tmp_path)["bot_mode"]["rooms"] == [

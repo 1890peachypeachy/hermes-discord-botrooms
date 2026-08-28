@@ -8,8 +8,8 @@ approvals, and restart recovery.
 Normal profile chats are unchanged. Room-only instructions do not disable
 Agent Inbox or `message_agent` anywhere else.
 
-> **Private beta:** users need Git access to this repository and a compatible
-> Hermes build. The compatibility check is mandatory.
+> **Beta:** users need a compatible Hermes build. The compatibility check is
+> mandatory.
 
 ## Install with an agent (recommended)
 
@@ -72,6 +72,8 @@ If compatibility fails, stop and read the guarded
   and IDs
 - [Hermes compatibility](docs/hermes-compatibility.md) — preflight and the
   exact-revision compatibility patch
+- [Official Bot Mode parity](docs/parity.md) — synchronized coordination
+  behavior, deliberate Discord differences, and drift alerts
 - [Operations and rollback](docs/operations.md) — status, live acceptance,
   removal, backup restore, and security boundaries
 
@@ -85,6 +87,10 @@ If compatibility fails, stop and read the guarded
   replies
 - room sessions, delivery state, and attachments survive restarts
 - bot tokens stay in existing Hermes profile credential stores
+
+The room uses real Hermes profile sessions and a reviewed Python port of the
+[official Bot Mode coordination logic](docs/parity.md), with Discord-specific
+durability and delivery safeguards.
 
 ## Development
 

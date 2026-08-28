@@ -41,6 +41,12 @@ class RoomEvent:
 
 
 @dataclass(frozen=True)
+class AgentEventCommit:
+    status: str
+    event: RoomEvent | None = None
+
+
+@dataclass(frozen=True)
 class MemberTurnResult:
     text: str = ""
     status: str = "complete"

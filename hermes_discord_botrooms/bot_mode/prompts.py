@@ -10,8 +10,15 @@ from .models import RoomEvent
 
 MAX_ROUNDS = 3
 MAX_MESSAGES = 10
+MAX_CONTINUATIONS = 2
 HISTORY_LIMIT = 24
+DUPLICATE_WINDOW_SECONDS = 10 * 60
 ROOM_PROTOCOL_VERSION = 1
+EMPTY_SENTINEL = "(empty)"
+EMPTY_FRIENDLY = (
+    "⚠️ The model returned no response after processing tool results. "
+    "This can happen with some models — try again or rephrase your question."
+)
 
 
 def room_system_instructions() -> str:
@@ -32,6 +39,13 @@ def room_system_instructions() -> str:
 def is_pass_text(text: str) -> bool:
     value = str(text or "").strip()
     return not value or re.fullmatch(r"\(?\s*pass\s*\)?\.?", value, re.I) is not None
+
+
+def normalize_room_text(text: str) -> str:
+    """Replace Hermes' internal empty-response sentinel before it reaches a room."""
+
+    value = str(text or "").strip()
+    return EMPTY_FRIENDLY if value == EMPTY_SENTINEL else value
 
 
 def parse_mentions(text: str, members: Sequence[BotRoomMember]) -> tuple[bool, set[str]]:
@@ -71,6 +85,29 @@ def resolve_responders(
     if everyone or not mentioned:
         return list(members)
     return [member for member in members if member.key in mentioned]
+
+
+def unaddressed_mentions(
+    log: Sequence[RoomEvent], members: Sequence[BotRoomMember]
+) -> list[str]:
+    """Return members whose latest member-to-member handoff has no later reply."""
+
+    member_keys = {member.key for member in members}
+    cited_at: dict[str, int] = {}
+    last_post_at: dict[str, int] = {}
+    for index, entry in enumerate(log):
+        if entry.author_kind != "member" or entry.author_id not in member_keys:
+            continue
+        last_post_at[entry.author_id] = index
+        _everyone, mentioned = parse_mentions(entry.text, members)
+        for key in mentioned:
+            if key != entry.author_id:
+                cited_at[key] = index
+    return [
+        member.key
+        for member in members
+        if member.key in cited_at and last_post_at.get(member.key, -1) <= cited_at[member.key]
+    ]
 
 
 def rotate_speakers(members: Sequence[BotRoomMember], round_number: int) -> list[BotRoomMember]:

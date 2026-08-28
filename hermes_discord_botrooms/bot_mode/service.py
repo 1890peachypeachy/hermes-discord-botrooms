@@ -247,7 +247,12 @@ class BotRoomService:
 
     async def _stop(self, room_id: str, thread_id: str) -> dict[str, Any]:
         room = self.room(room_id)
-        run = await asyncio.to_thread(self.store.request_stop, room_id, thread_id)
+        run = await asyncio.to_thread(
+            self.store.request_stop,
+            room_id,
+            thread_id,
+            [member.key for member in room.members],
+        )
         if not run:
             return {"stopped": False, "reason": "no active run"}
         pending = self.store.pending_prompt(room_id)

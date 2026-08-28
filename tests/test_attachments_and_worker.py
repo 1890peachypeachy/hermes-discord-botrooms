@@ -12,8 +12,20 @@ from hermes_discord_botrooms.bot_mode.models import RoomAttachment
 from hermes_discord_botrooms.bot_mode.profile_worker import (
     JsonRpcWorker,
     ProfileWorkerExecutor,
+    _pick_turn_reply,
     _room_session_source,
 )
+
+
+def test_terminal_reply_prefers_substantive_history_over_trailing_pass():
+    messages = [
+        {"role": "assistant", "content": "old", "row_id": 10},
+        {"role": "assistant", "content": [{"text": "full "}, {"text": "answer"}], "row_id": 12},
+        {"role": "assistant", "text": "(pass)", "row_id": 13},
+    ]
+    assert _pick_turn_reply(messages, 10) == "full answer"
+    assert _pick_turn_reply(messages[-1:], 10) == "(pass)"
+    assert _pick_turn_reply(messages, 13) is None
 
 
 def test_data_attachment_accepts_wrapped_base64_and_sanitizes_the_name(tmp_path: Path):
