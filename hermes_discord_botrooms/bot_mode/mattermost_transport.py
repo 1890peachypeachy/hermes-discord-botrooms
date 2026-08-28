@@ -237,11 +237,19 @@ class MattermostRoomTransport:
         self,
         *,
         profile: str,
+        channel_id: str,
         thread_id: str,
         text: str,
         nonce_seed: str = "",
         event_id: int = 0,
     ) -> str:
+        """Post text to a Mattermost room.
+
+        ``thread_id`` is the room thread's root post ID (Mattermost threads are
+        addressed as channel_id + root_id).  An empty ``thread_id`` posts a
+        top-level channel message.
+        """
+
         base_url, token = _profile_credentials(self.root, profile)
         if not token:
             raise RuntimeError(
@@ -253,7 +261,7 @@ class MattermostRoomTransport:
                 delivered = self.store.delivered_chunk_message_id(
                     event_id,
                     platform=PLATFORM,
-                    destination=thread_id,
+                    destination=thread_id or channel_id,
                     chunk_index=index,
                 )
                 if delivered:
@@ -263,7 +271,7 @@ class MattermostRoomTransport:
                     self.store.delivery_chunk_status(
                         event_id,
                         platform=PLATFORM,
-                        destination=thread_id,
+                        destination=thread_id or channel_id,
                         chunk_index=index,
                     )
                     == "unknown"
@@ -273,9 +281,11 @@ class MattermostRoomTransport:
                         "it was not reposted"
                     )
             payload: dict[str, Any] = {
-                "channel_id": thread_id,
+                "channel_id": channel_id,
                 "message": chunk,
             }
+            if thread_id:
+                payload["root_id"] = thread_id
             if event_id:
                 # Write ahead of the HTTP request. If Mattermost accepts the
                 # POST but its response is lost, a later process must not
@@ -283,7 +293,7 @@ class MattermostRoomTransport:
                 self.store.begin_delivery_chunk(
                     event_id,
                     platform=PLATFORM,
-                    destination=thread_id,
+                    destination=thread_id or channel_id,
                     chunk_index=index,
                     nonce="",
                 )
@@ -301,7 +311,7 @@ class MattermostRoomTransport:
                     self.store.fail_delivery_chunk_definitively(
                         event_id,
                         platform=PLATFORM,
-                        destination=thread_id,
+                        destination=thread_id or channel_id,
                         chunk_index=index,
                         nonce="",
                         error=str(exc),
@@ -317,7 +327,7 @@ class MattermostRoomTransport:
                 self.store.record_delivery_chunk(
                     event_id,
                     platform=PLATFORM,
-                    destination=thread_id,
+                    destination=thread_id or channel_id,
                     chunk_index=index,
                     nonce="",
                     status="delivered",
@@ -340,6 +350,7 @@ class MattermostRoomTransport:
         try:
             message_id = await self.send_text(
                 profile=member.profile,
+                channel_id=room.channel_id,
                 thread_id=destination,
                 text=event.text,
                 nonce_seed=event.event_uid,

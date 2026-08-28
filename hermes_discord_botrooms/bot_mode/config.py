@@ -235,6 +235,7 @@ def load_bot_room_registry(root: Path | None = None) -> dict[str, BotRoomConfig]
     room_rows: Iterable[Any] = raw.get("rooms") or [] if isinstance(raw, dict) else []
     registry: dict[str, BotRoomConfig] = {}
     discord_channels: dict[str, str] = {}
+    mattermost_channels: dict[str, str] = {}
     for row in room_rows:
         room = _room_from_raw(row)
         if not room.enabled:
@@ -249,8 +250,40 @@ def load_bot_room_registry(root: Path | None = None) -> dict[str, BotRoomConfig]
                     f"{claimed_by!r} and {room.room_id!r}"
                 )
             discord_channels[room.channel_id] = room.room_id
+        if room.platform == "mattermost":
+            claimed_by = mattermost_channels.get(room.channel_id)
+            if claimed_by is not None:
+                raise BotRoomConfigError(
+                    f"Mattermost channel {room.channel_id!r} is claimed by "
+                    f"both {claimed_by!r} and {room.room_id!r}"
+                )
+            mattermost_channels[room.channel_id] = room.room_id
         registry[room.room_id] = room
     return registry
+
+
+def room_for_mattermost_channel(
+    registry: dict[str, BotRoomConfig],
+    *,
+    channel_id: str,
+    root_id: str = "",
+) -> BotRoomConfig | None:
+    """Resolve a configured Mattermost room by channel (threads included).
+
+    Mattermost threads live inside a channel and inherit its room, so both the
+    channel ID and any root post ID inside that channel map to the same room.
+    """
+
+    candidates = {str(channel_id or ""), str(root_id or "")}
+    candidates.discard("")
+    for room in registry.values():
+        if room.platform != "mattermost":
+            continue
+        if room.channel_id in candidates or any(
+            member.connection_id in candidates for member in room.members
+        ):
+            return room
+    return None
 
 
 def discord_channel_is_configured(

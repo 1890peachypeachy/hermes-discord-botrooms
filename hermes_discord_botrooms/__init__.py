@@ -26,6 +26,15 @@ def register(ctx) -> None:
     report = check_compatibility()
     if report.compatible:
         register_platform(ctx)
+        try:
+            from .mattermost_adapter import register_platform as register_mm
+
+            register_mm(ctx)
+        except Exception:
+            logger.exception(
+                "Mattermost Bot Rooms platform could not be registered; "
+                "Discord Bot Rooms remains active."
+            )
     else:
         logger.error(
             "Hermes Discord Bot Rooms is installed but inactive: %s. Run `hermes botrooms doctor`.",
