@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
@@ -62,7 +63,7 @@ class RoomRunEngine:
         self.store = store
         self.executor = executor
         self.event_sink = event_sink or _nothing
-        self._process_locks: dict[str, asyncio.Lock] = {}
+        self._process_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     async def _emit(self, kind: str, **payload: Any) -> None:
         try:
@@ -119,10 +120,24 @@ class RoomRunEngine:
         *,
         recovering: bool = False,
     ) -> None:
-        process_lock = self._process_locks.setdefault(room.room_id, asyncio.Lock())
+        # Discord threads are independent room instances. Other adapters keep
+        # the legacy one-active-run-per-room behavior.
+        instance_thread_id = thread_id if room.platform == "discord" else ""
+        instance_key = (room.room_id, instance_thread_id)
+        process_lock = self._process_locks.setdefault(instance_key, asyncio.Lock())
         async with process_lock:
-            lock_cm = room_run_lock(self.store, room.room_id)
-            await asyncio.to_thread(lock_cm.__enter__)
+            lock_cm = room_run_lock(self.store, room.room_id, instance_thread_id)
+            enter_task = asyncio.create_task(asyncio.to_thread(lock_cm.__enter__))
+            try:
+                await asyncio.shield(enter_task)
+            except asyncio.CancelledError:
+                # The blocking flock continues in its worker thread after an
+                # asyncio cancellation. Join it and release the acquired file
+                # lock so a stopped run cannot strand the room instance.
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(enter_task)
+                    await asyncio.to_thread(lock_cm.__exit__, None, None, None)
+                raise
             try:
                 await self._run_locked(room, thread_id, run_id, recovering=recovering)
             finally:
@@ -288,7 +303,7 @@ class RoomRunEngine:
         if not delta:
             return "silent"
         anchor_id = delta[-1].id
-        if member.key in self.store.holds(room.room_id):
+        if member.key in self.store.holds(room.room_id, thread_id):
             self.store.advance_watermark(room.room_id, thread_id, member.key, anchor_id)
             await self._emit(
                 "member.held",
@@ -324,25 +339,27 @@ class RoomRunEngine:
                 attachments,
                 run_id=run_id,
                 thread_id=thread_id,
-                stored_session_id=self.store.session_id(room.room_id, member.key),
+                stored_session_id=self.store.session_id(room.room_id, thread_id, member.key),
                 on_blocked=self._blocked,
                 recovering=recovering,
             )
         except Exception as exc:
             logger.exception(
-                "Bot Mode member turn failed room=%s member=%s",
+                "Bot Mode member turn failed room=%s thread=%s member=%s",
                 room.room_id,
+                thread_id,
                 member.key,
             )
             result = MemberTurnResult(status="error", error=str(exc))
         if result.stored_session_id:
             self.store.save_session(
                 room.room_id,
+                thread_id,
                 member.key,
                 member.profile,
                 result.stored_session_id,
             )
-        self.store.clear_pending_prompt(room.room_id, member.key)
+        self.store.clear_pending_prompt(room.room_id, thread_id, member.key)
         if self.store.run_should_stop(run_id):
             self.store.clear_turn_attempt(run_id, member.key)
             row = self.store.run_row(run_id)
@@ -355,7 +372,7 @@ class RoomRunEngine:
                 )
                 return "superseded"
             return "stopped"
-        current_epoch = self.store.room_epoch(room.room_id)
+        current_epoch = self.store.room_epoch(room.room_id, thread_id)
         newer_user = self.store.newer_user_in_thread(room.room_id, thread_id, anchor_id)
         if not should_commit_turn(dispatch_epoch, current_epoch, newer_user):
             self.store.clear_turn_attempt(run_id, member.key)

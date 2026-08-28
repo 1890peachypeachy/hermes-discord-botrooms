@@ -1,10 +1,11 @@
 name: hermes-discord-botrooms
 label: Discord Bot Rooms
 kind: standalone
-version: 0.2.0
+version: 0.3.0b1
 description: >
   Run bounded multi-profile Hermes group rooms through existing Discord bot
-  identities, with persistent context, typing indicators, and safe recovery.
+  identities, with persistent per-thread context, typing indicators, and safe
+  recovery.
 author: DanielOu1208
 platforms:
   - linux

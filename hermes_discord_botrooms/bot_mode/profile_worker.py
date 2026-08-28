@@ -30,8 +30,14 @@ BASE_TURN_TIMEOUT_SECONDS = 180
 HARD_TURN_TIMEOUT_SECONDS = 20 * 60
 
 
-def _room_session_source(room: BotRoomConfig, member: BotRoomMember) -> str:
-    identity = f"{room.room_id}\0{member.key}".encode("utf-8")
+def _room_session_source(
+    room: BotRoomConfig, member: BotRoomMember, thread_id: str = ""
+) -> str:
+    identity = (
+        f"{room.room_id}\0{thread_id}\0{member.key}"
+        if room.platform == "discord"
+        else f"{room.room_id}\0{member.key}"
+    ).encode("utf-8")
     return (
         f"bot_room:v{ROOM_PROTOCOL_VERSION}:{hashlib.blake2s(identity, digest_size=10).hexdigest()}"
     )
@@ -295,8 +301,8 @@ class ProfileWorkerExecutor:
         self._room_store = RoomStore(self.root)
         self._workers: dict[str, JsonRpcWorker] = {}
         self._turn_locks: dict[str, asyncio.Lock] = {}
-        self._runtime_sessions: dict[tuple[str, str], str] = {}
-        self._stored_sessions: dict[tuple[str, str], str] = {}
+        self._runtime_sessions: dict[tuple[str, str, str], str] = {}
+        self._stored_sessions: dict[tuple[str, str, str], str] = {}
         self._guard = threading.Lock()
 
     def _worker(self, profile: str) -> JsonRpcWorker:
@@ -372,10 +378,12 @@ class ProfileWorkerExecutor:
         self,
         room: BotRoomConfig,
         member: BotRoomMember,
+        thread_id: str,
         stored_hint: str = "",
     ) -> tuple[JsonRpcWorker, str, str, dict[str, Any]]:
         worker = self._worker(member.profile)
-        key = (room.room_id, member.key)
+        instance_thread_id = thread_id if room.platform == "discord" else ""
+        key = (room.room_id, instance_thread_id, member.key)
         runtime = self._runtime_sessions.get(key, "")
         if runtime:
             try:
@@ -390,8 +398,12 @@ class ProfileWorkerExecutor:
                 if exc.code not in {4001, 4007}:
                     raise
                 self._runtime_sessions.pop(key, None)
-        title = f"Group: {room.room_id}"
-        session_source = _room_session_source(room, member)
+        title = (
+            f"Group: {room.room_id} / Discord {thread_id}"
+            if room.platform == "discord"
+            else f"Group: {room.room_id}"
+        )
+        session_source = _room_session_source(room, member, thread_id)
         target = stored_hint or self._stored_sessions.get(key, "")
         if not target:
             listed = await self._call(worker, "session.list", {"title": title}, 30)
@@ -570,7 +582,7 @@ class ProfileWorkerExecutor:
                 str(attempt.get("stored_session_id") or "") if attempt is not None else ""
             ) or stored_session_id
             worker, runtime, stored, session_result = await self.ensure_session(
-                room, member, resume_hint
+                room, member, thread_id, resume_hint
             )
             auto_continuing = bool(recovering and session_result.get("auto_continue"))
             baseline_row_id = int((attempt or {}).get("baseline_row_id") or 0)
@@ -824,8 +836,12 @@ class ProfileWorkerExecutor:
         worker = self._worker(profile)
         await self._call(worker, "session.interrupt", {"session_id": runtime_session_id}, 30)
 
-    async def interrupt_room_member(self, room_id: str, member: BotRoomMember) -> bool:
-        runtime = self._runtime_sessions.get((room_id, member.key), "")
+    async def interrupt_room_member(
+        self, room_id: str, thread_id: str, member: BotRoomMember
+    ) -> bool:
+        runtime = self._runtime_sessions.get((room_id, thread_id, member.key), "")
+        if not runtime:
+            runtime = self._runtime_sessions.get((room_id, "", member.key), "")
         if not runtime:
             return False
         await self.interrupt(member.profile, runtime)

@@ -385,11 +385,15 @@ class BotRoomsDiscordAdapter(base.DiscordAdapter):
         lowered = raw.lower()
         if lowered in {"/room-status", "/stop"}:
             if lowered == "/stop":
-                result = await self._botrooms_service.stop(
-                    room.room_id,
-                    str(getattr(thread, "id", "") or ""),
-                )
-                text = "Stop requested." if result.get("stopped") else "No room run is active."
+                if thread is None:
+                    text = "Use `/stop` inside the Bot Room thread you want to stop."
+                else:
+                    result = await self._botrooms_service.stop(room.room_id, str(thread.id))
+                    text = (
+                        "Stop requested."
+                        if result.get("stopped")
+                        else "No room run is active."
+                    )
             else:
                 text = self._format_room_status(
                     self._botrooms_service.status(
@@ -454,6 +458,20 @@ class BotRoomsDiscordAdapter(base.DiscordAdapter):
 
     @staticmethod
     def _format_room_status(status: dict[str, Any]) -> str:
+        if status.get("aggregate"):
+            active = list(status.get("active_threads") or [])
+            lines = [
+                f"**{status.get('display_name') or status.get('room_id')}** — "
+                f"{len(active)} active thread{'s' if len(active) != 1 else ''}"
+            ]
+            for item in active[:10]:
+                detail = str(item.get("status") or "active")
+                if item.get("current_member"):
+                    detail += f" ({item['current_member']})"
+                lines.append(f"<#{item.get('thread_id')}> — {detail}")
+            if len(active) > 10:
+                lines.append(f"…and {len(active) - 10} more active threads.")
+            return "\n".join(lines)
         run = status.get("run") or {}
         lines = [
             f"**{status.get('display_name') or status.get('room_id')}** — "
@@ -506,6 +524,12 @@ class BotRoomsDiscordAdapter(base.DiscordAdapter):
         thread_id = (
             str(getattr(channel, "id", "") or "") if isinstance(channel, discord.Thread) else ""
         )
+        if action != "room-status" and not thread_id:
+            await interaction.response.send_message(
+                f"Use `/{action}` inside the Bot Room thread you want to control.",
+                ephemeral=True,
+            )
+            return True
         if action == "stop":
             result = await service.stop(room.room_id, thread_id)
             text = "Stop requested." if result.get("stopped") else "No room run is active."
@@ -536,7 +560,7 @@ class BotRoomsDiscordAdapter(base.DiscordAdapter):
                         thread_id=thread_id,
                     )
                 try:
-                    result = await service.respond(room.room_id, member.key, value)
+                    result = await service.respond(room.room_id, thread_id, member.key, value)
                 except Exception:
                     if typing_started:
                         await transport.stop_typing(

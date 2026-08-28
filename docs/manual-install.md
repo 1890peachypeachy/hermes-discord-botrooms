@@ -15,10 +15,13 @@ from the environment where `hermes` is installed.
 See [Discord setup](discord-setup.md) before continuing if the bots, tokens,
 intents, or channel permissions are not ready.
 
+If Bot Rooms v0.2 is already installed, stop here and follow the
+[v0.3.0 beta 1 upgrade checklist](releases/v0.3.0-beta.1.md) first.
+
 ## Preflight
 
 ```bash
-git clone git@github.com:DanielOu1208/hermes-discord-botrooms.git &&
+git clone https://github.com/DanielOu1208/hermes-discord-botrooms.git &&
 cd hermes-discord-botrooms &&
 python -m hermes_discord_botrooms.compat --json &&
 hermes plugins doctor . --ci
@@ -39,7 +42,7 @@ if [ -n "$(git status --porcelain)" ]; then
 else
   BOTROOMS_REF="$(git rev-parse HEAD)" &&
   printf 'Installing Bot Rooms commit: %s\n' "$BOTROOMS_REF" &&
-  hermes plugins install git@github.com:DanielOu1208/hermes-discord-botrooms.git \
+  hermes plugins install https://github.com/DanielOu1208/hermes-discord-botrooms.git \
     --enable \
     --ref "$BOTROOMS_REF" &&
   hermes botrooms doctor --pre-install
@@ -54,6 +57,9 @@ profiles, one controller, a Discord server ID, and a channel ID:
 ```bash
 hermes botrooms setup --restart
 ```
+
+Restarting the selected gateways is already the default; `--restart` is shown
+to make that release-critical step explicit.
 
 For automation, replace every angle-bracket placeholder and preview first:
 
@@ -70,7 +76,10 @@ hermes botrooms setup \
   --json
 ```
 
-Review the redacted JSON, then rerun the same command without `--dry-run`.
+Review the redacted JSON. Before applying it, record the current `config.yaml`
+path, SHA-256, and modification time; the dry run's `config_path` identifies the
+file. Then rerun the same command without `--dry-run`. After the write, verify
+that `config.yaml.botrooms-backup` has the recorded pre-setup checksum.
 Setup restarts only the selected gateways by default. `--no-restart` is a
 development-only escape hatch and is unsafe for an active room rollout.
 

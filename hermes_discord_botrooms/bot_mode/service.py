@@ -211,7 +211,8 @@ class BotRoomService:
 
     async def _interrupt_superseded_run(self, room: BotRoomConfig, run_id: str) -> None:
         run = self.store.run_row(run_id)
-        pending = self.store.pending_prompt(room.room_id)
+        thread_id = str((run or {}).get("thread_id") or "")
+        pending = self.store.pending_prompt(room.room_id, thread_id) if thread_id else None
         old_task = self._tasks.get(run_id)
         try:
             # Stop and join the old scheduler first. ProfileWorkerExecutor's
@@ -229,7 +230,7 @@ class BotRoomService:
                 member = room.member(str(run.get("current_member") or ""))
                 interrupt_current = getattr(self.executor, "interrupt_room_member", None)
                 if member is not None and interrupt_current is not None:
-                    await interrupt_current(room.room_id, member)
+                    await interrupt_current(room.room_id, thread_id, member)
         except Exception:
             logger.exception(
                 "Bot Mode superseded-turn interrupt failed room=%s run=%s",
@@ -247,6 +248,8 @@ class BotRoomService:
 
     async def _stop(self, room_id: str, thread_id: str) -> dict[str, Any]:
         room = self.room(room_id)
+        if room.platform == "discord" and not thread_id:
+            return {"stopped": False, "reason": "thread required"}
         run = await asyncio.to_thread(
             self.store.request_stop,
             room_id,
@@ -255,37 +258,76 @@ class BotRoomService:
         )
         if not run:
             return {"stopped": False, "reason": "no active run"}
-        pending = self.store.pending_prompt(room_id)
-        if pending and pending.run_id == run["run_id"]:
-            member = room.member(pending.member_key)
-            if member is not None:
-                try:
+        run_thread_id = str(run.get("thread_id") or thread_id)
+        pending = self.store.pending_prompt(room_id, run_thread_id)
+        task = self._tasks.get(str(run["run_id"]))
+        try:
+            # A run may still be waiting for its profile's serialized turn
+            # lane. Cancelling and joining the scheduler prevents it from
+            # entering that lane after `/stop` has already returned.
+            if task is not None and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            if pending and pending.run_id == run["run_id"]:
+                member = room.member(pending.member_key)
+                if member is not None:
                     await self.executor.interrupt(member.profile, pending.runtime_session_id)
-                except Exception:
-                    logger.exception("Bot Mode interrupt failed")
-        else:
-            member = room.member(str(run.get("current_member") or ""))
-            interrupt_current = getattr(self.executor, "interrupt_room_member", None)
-            if member is not None and interrupt_current is not None:
-                try:
-                    await interrupt_current(room_id, member)
-                except Exception:
-                    logger.exception("Bot Mode active-turn interrupt failed")
+            else:
+                member = room.member(str(run.get("current_member") or ""))
+                interrupt_current = getattr(self.executor, "interrupt_room_member", None)
+                if member is not None and interrupt_current is not None:
+                    await interrupt_current(room_id, run_thread_id, member)
+        except Exception:
+            logger.exception("Bot Mode interrupt failed")
+        finally:
+            self.store.clear_run_prompts(str(run["run_id"]))
         return {"stopped": True, "run_id": run["run_id"]}
 
-    async def respond(self, room_id: str, member_key: str, value: str) -> dict[str, Any]:
-        return await self._await(self._respond(room_id, member_key, value))
+    async def respond(
+        self,
+        room_id: str,
+        thread_id: str = "",
+        member_key: str | None = None,
+        value: str | None = None,
+    ) -> dict[str, Any]:
+        if value is None:
+            # Preserve the legacy Desktop call shape:
+            # respond(room_id, member_key, value).
+            value = str(member_key or "")
+            member_key = thread_id
+            thread_id = ""
+        return await self._await(self._respond(room_id, thread_id, member_key, value))
 
-    def respond_sync(self, room_id: str, member_key: str, value: str) -> dict[str, Any]:
-        return self._submit_coro(self._respond(room_id, member_key, value)).result(timeout=30)
+    def respond_sync(
+        self,
+        room_id: str,
+        thread_id: str = "",
+        member_key: str | None = None,
+        value: str | None = None,
+    ) -> dict[str, Any]:
+        if value is None:
+            value = str(member_key or "")
+            member_key = thread_id
+            thread_id = ""
+        return self._submit_coro(
+            self._respond(room_id, thread_id, member_key, value)
+        ).result(timeout=30)
 
-    async def _respond(self, room_id: str, member_key: str, value: str) -> dict[str, Any]:
-        pending = self.store.pending_prompt(room_id, member_key)
+    async def _respond(
+        self, room_id: str, thread_id: str, member_key: str | None, value: str
+    ) -> dict[str, Any]:
+        room = self.room(room_id)
+        if room.platform == "discord" and not thread_id:
+            return {"resolved": False, "reason": "thread required"}
+        if not member_key:
+            return {"resolved": False, "reason": "member required"}
+        pending = self.store.pending_prompt(room_id, thread_id, member_key)
         if pending is None:
             return {"resolved": False, "reason": "no pending prompt"}
         resolved = await self.executor.respond(pending, value)
         if resolved:
-            self.store.clear_pending_prompt(room_id, member_key)
+            self.store.clear_pending_prompt(room_id, thread_id, member_key)
             self.store.update_run(pending.run_id, "running", current_member=member_key)
         return {"resolved": bool(resolved), "run_id": pending.run_id}
 

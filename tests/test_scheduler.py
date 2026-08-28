@@ -84,7 +84,7 @@ async def test_scheduler_runs_serially_hides_pass_and_reuses_member_sessions(tmp
         "Decide the architecture",
         "Approach B is best.",
     ]
-    assert store.session_id("agents", "researcher") == "session-researcher"
+    assert store.session_id("agents", "thread", "researcher") == "session-researcher"
     assert store.run_row(submitted.run_id)["status"] == "settled"
     assert [event["kind"] for event in events].count("message") == 1
 
@@ -170,7 +170,7 @@ async def test_stop_during_member_turn_drops_the_racing_reply_and_holds_members(
     await RoomRunEngine(store, StoppingExecutor()).run(room, "thread", submitted.run_id)
     assert [event.text for event in store.thread_events("agents", "thread")] == ["start"]
     assert store.run_row(submitted.run_id)["status"] == "stopped"
-    assert store.holds("agents") == {"researcher", "coder"}
+    assert store.holds("agents", "thread") == {"researcher", "coder"}
 
 
 @pytest.mark.asyncio

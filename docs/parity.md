@@ -26,6 +26,10 @@ delivery. Superseded or timed-out turns are interrupted promptly. Room members
 are told not to use Agent Inbox with each other inside the room; their normal
 chats and coordination outside Bot Rooms are unchanged.
 
+Each Discord thread is an independent room instance. A new top-level channel
+message starts fresh member sessions and lifecycle state, while follow-ups in
+the same thread resume that thread alone.
+
 Desktop UI layout and cross-machine room synchronization are outside this
 plugin's scope.
 

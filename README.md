@@ -5,11 +5,19 @@ its own model, memory, tools, SOUL, and bot identity; the plugin coordinates
 serial replies, persistent room context, typing indicators, attachments,
 approvals, and restart recovery.
 
-Normal profile chats are unchanged. Room-only instructions do not disable
-Agent Inbox or `message_agent` anywhere else.
+The configured Discord channel is a room template: every new top-level message
+creates a separate Bot Room thread with fresh agent context. Replies inside that
+thread continue only that room.
+
+Normal one-to-one profile chats and Hermes agent-to-agent messaging tools are
+unchanged outside Bot Rooms.
 
 > **Beta:** users need a compatible Hermes build. The compatibility check is
-> mandatory.
+> mandatory. This checkout documents **v0.3.0 beta 1** (`0.3.0b1`).
+
+Use a dedicated Discord channel for each configured room. A top-level human
+message in that channel always starts a new Bot Room; it is not treated as a
+follow-up to an older thread.
 
 ## Install with an agent (recommended)
 
@@ -20,7 +28,13 @@ Before starting, the user needs:
 - one Discord bot identity per participating profile
 - the Discord server and channel IDs
 
-Send this repository URL to a coding agent with the following prompt:
+Bot Rooms does not install Hermes or create profiles. Complete
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) setup first. The
+recommended installer is a coding agent with terminal access to the machine;
+the supplied prompt requires it to inspect first and ask before every change.
+
+Send [`https://github.com/DanielOu1208/hermes-discord-botrooms`](https://github.com/DanielOu1208/hermes-discord-botrooms)
+to a coding agent with the following prompt:
 
 > Clone this repository and follow its README and linked documentation. Inspect
 > my Hermes profiles, gateways, active runtime, and Discord readiness without
@@ -52,7 +66,7 @@ account.
 Run from the Python environment where `hermes` is installed:
 
 ```bash
-git clone git@github.com:DanielOu1208/hermes-discord-botrooms.git &&
+git clone https://github.com/DanielOu1208/hermes-discord-botrooms.git &&
 cd hermes-discord-botrooms &&
 python -m hermes_discord_botrooms.compat --json &&
 hermes plugins doctor . --ci
@@ -61,6 +75,10 @@ hermes plugins doctor . --ci
 If both checks pass, follow the [manual installation guide](docs/manual-install.md).
 If compatibility fails, stop and read the guarded
 [Hermes compatibility procedure](docs/hermes-compatibility.md).
+
+Already running v0.2? Read the
+[v0.3.0 beta 1 upgrade notes](docs/releases/v0.3.0-beta.1.md) before replacing
+any installed plugin copy.
 
 ## Documentation
 
@@ -76,17 +94,29 @@ If compatibility fails, stop and read the guarded
   behavior, deliberate Discord differences, and drift alerts
 - [Operations and rollback](docs/operations.md) — status, live acceptance,
   removal, backup restore, and security boundaries
+- [v0.3.0 beta 1 release and upgrade notes](docs/releases/v0.3.0-beta.1.md) —
+  behavior changes, migration effects, and the upgrade checklist
+- [Changelog](CHANGELOG.md) — release history
 
 ## Core behavior
 
-- one controller receives human messages and creates the room thread
+- one controller receives each top-level human message and creates a fresh,
+  isolated room thread
 - selected members run serially and can respond selectively with `@mentions`
 - each working member shows its own typing indicator and posts through its own
   Discord bot
 - configured room channels are reserved so ordinary gateways do not duplicate
   replies
-- room sessions, delivery state, and attachments survive restarts
+- each thread's sessions, run state, delivery state, and attachments survive
+  restarts without leaking into sibling threads
+- `/room-status` in the parent channel summarizes active threads; mutating
+  controls such as `/stop` must be used inside the target thread
 - bot tokens stay in existing Hermes profile credential stores
+
+For example, `@coder review this` routes the turn to the room member whose
+profile or configured handle is `coder`; no routing mention means every member
+may respond. Selecting a Discord bot with the mention picker works too. Bot
+responses render these handles as plain text and do not ping Discord users.
 
 The room uses real Hermes profile sessions and a reviewed Python port of the
 [official Bot Mode coordination logic](docs/parity.md), with Discord-specific

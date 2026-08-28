@@ -1,6 +1,6 @@
 # Hermes compatibility patch
 
-`hermes-machine-session-hooks.patch` is the private-beta compatibility patch
+`hermes-machine-session-hooks.patch` is the beta compatibility patch
 for Hermes Agent commit:
 
 ```text
@@ -24,6 +24,7 @@ python -m pytest -q tests/test_tui_gateway_server.py \
   -k "session_create or session_resume or tool_progress or reset_session_agent"
 ```
 
-Do not apply it to a different revision without rebasing and rerunning the full
-gateway test suite. Prefer an upstream Hermes release containing
-`MACHINE_SESSION_HOOKS_VERSION = 1` once one exists.
+Do not apply it to a different revision. Rebasing this patch is maintainer
+development work that must produce a newly reviewed, newly pinned patch and a
+full test run; it is not a supported installation path. Prefer an upstream
+Hermes release containing `MACHINE_SESSION_HOOKS_VERSION = 1` once one exists.

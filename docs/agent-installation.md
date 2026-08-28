@@ -4,6 +4,11 @@ This is the detailed path for a coding agent installing Bot Rooms on someone
 else's machine. It separates read-only discovery, plugin installation, room
 activation, and real Discord acceptance.
 
+For an existing v0.2 installation, also read the
+[v0.3.0 beta 1 upgrade notes](releases/v0.3.0-beta.1.md) before proposing any
+change. The upgrade has a one-time Discord context migration that must be
+disclosed before approval.
+
 ## 1. Inspect without changing anything
 
 From the cloned Bot Rooms repository, run:
@@ -23,6 +28,16 @@ For every candidate profile, also run the profile-scoped gateway status:
 hermes --profile "profile-name" gateway status
 ```
 
+Terms used below:
+
+- **Hermes root:** the installation directory containing shared configuration
+  and Bot Rooms state
+- **profile home:** one profile's configuration, credentials, and installed
+  plugins
+- **gateway:** the background Hermes process connected to Discord for one
+  profile
+- **loaded revision:** the exact Bot Rooms Git commit used by that gateway
+
 Use the discovered profile names; do not guess them. Obtain a gateway PID from
 Hermes status or its known managed-service entry, then inspect only that PID:
 
@@ -39,6 +54,8 @@ when Hermes reports a managed service. Map each selected profile to:
 - the active `hermes` executable and Python environment
 - the loaded plugin revision, when already installed
 - the connected Discord bot identity, when the gateway is live
+- whether a Bot Rooms state directory already exists and needs a backup before
+  upgrade
 
 Do not infer ownership from display names, stale status JSON, or a directory
 that merely looks conventional. If the runtime source must be matched to a
@@ -89,6 +106,11 @@ Show:
 - the profiles being considered
 - any readiness gaps or unverified identities
 
+For an existing installation, also show the state backup path and explain that
+the v0.3 migration stops unfinished Discord room work, clears unresolved
+prompts and holds, and starts fresh model context in every existing Discord
+thread. Discord message history remains visible and persisted.
+
 Ask the user to approve that exact plugin revision. After approval, follow the
 pinned installation section in [Manual installation](manual-install.md), then
 run:
@@ -112,9 +134,16 @@ Show the redacted JSON and confirm it names only the selected profiles,
 configuration path, exact plugin revision, and gateway restart commands. Ask
 the user to approve those room changes and restarts.
 
+Before applying the setup, record the current `config.yaml` path, SHA-256, and
+modification time without printing its contents. Keep this provenance with the
+approved dry run.
+
 After approval, rerun the same command without `--dry-run`. Do not manually
 copy plugin directories between profiles; the setup command preserves source
 and revision metadata while installing the selected profile copies.
+
+After setup writes `config.yaml.botrooms-backup`, verify that backup matches
+the recorded pre-setup checksum.
 
 ## 5. Verify the rollout
 

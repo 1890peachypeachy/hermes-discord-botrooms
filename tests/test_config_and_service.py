@@ -41,10 +41,44 @@ class InterruptibleExecutor(PassExecutor):
             await asyncio.sleep(0.01)
         return MemberTurnResult(text="(pass)", stored_session_id=f"stored-{member.profile}")
 
-    async def interrupt_room_member(self, room_id, member):
-        self.interrupts.append((room_id, member.profile))
+    async def interrupt_room_member(self, room_id, thread_id, member):
+        self.interrupts.append((room_id, thread_id, member.profile))
         self.release.set()
         return True
+
+
+class MultiThreadExecutor(PassExecutor):
+    def __init__(self):
+        super().__init__()
+        self.started = {"thread-one": threading.Event(), "thread-two": threading.Event()}
+        self.release = threading.Event()
+
+    async def turn(self, room, member, prompt, attachments, **kwargs):
+        thread_id = kwargs["thread_id"]
+        self.calls.append((member.profile, kwargs))
+        self.started[thread_id].set()
+        while not self.release.is_set():
+            await asyncio.sleep(0.01)
+        return MemberTurnResult(text="(pass)", stored_session_id=f"stored-{thread_id}")
+
+
+class SerializedProfileExecutor(PassExecutor):
+    def __init__(self):
+        super().__init__()
+        self._lane = asyncio.Lock()
+        self.first_started = threading.Event()
+        self.release_first = threading.Event()
+        self.entered = []
+
+    async def turn(self, room, member, prompt, attachments, **kwargs):
+        async with self._lane:
+            thread_id = kwargs["thread_id"]
+            self.entered.append(thread_id)
+            if thread_id == "thread-one":
+                self.first_started.set()
+                while not self.release_first.is_set():
+                    await asyncio.sleep(0.01)
+            return MemberTurnResult(text="(pass)", stored_session_id=f"stored-{thread_id}")
 
 
 def test_registry_is_installation_scoped_and_threads_match_the_parent(tmp_path: Path):
@@ -90,6 +124,62 @@ def test_registry_is_installation_scoped_and_threads_match_the_parent(tmp_path: 
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_discord_service_requires_thread_for_mutating_controls(tmp_path: Path):
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "bot_mode": {
+                    "rooms": [
+                        {
+                            "room_id": "agents",
+                            "platform": "discord",
+                            "guild_id": "guild",
+                            "channel_id": "parent",
+                            "controller_profile": "default",
+                            "members": ["default", "coder"],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = BotRoomService(tmp_path, executor=PassExecutor())
+    try:
+        assert await service.stop("agents") == {
+            "stopped": False,
+            "reason": "thread required",
+        }
+        assert await service.respond("agents", "", "coder", "continue") == {
+            "resolved": False,
+            "reason": "thread required",
+        }
+    finally:
+        service.close()
+
+
+@pytest.mark.asyncio
+async def test_desktop_service_keeps_the_legacy_respond_call_shape(tmp_path: Path):
+    service = BotRoomService(tmp_path, executor=PassExecutor())
+    service.create_or_update(
+        {
+            "room_id": "desktop-room",
+            "display_name": "Desktop Room",
+            "platform": "desktop",
+            "controller_profile": "default",
+            "members": ["default", "coder"],
+        }
+    )
+    try:
+        assert await service.respond("desktop-room", "coder", "continue") == {
+            "resolved": False,
+            "reason": "no pending prompt",
+        }
+    finally:
+        service.close()
 
 
 def test_registry_prefers_namespaced_plugin_rooms(tmp_path: Path):
@@ -315,7 +405,7 @@ async def test_service_clears_stale_prompt_while_recovering_blocked_run(
     try:
         await asyncio.wait_for(finished.wait(), timeout=5)
         assert service.store.run_row(submitted.run_id)["status"] == "settled"
-        assert service.store.pending_prompt(room.room_id) is None
+        assert service.store.pending_prompt(room.room_id, "thread") is None
         assert executor.calls
         assert all(call[1].get("recovering") for call in executor.calls)
     finally:
@@ -349,14 +439,14 @@ async def test_new_submit_interrupts_the_superseded_active_turn(tmp_path: Path):
         assert await asyncio.to_thread(executor.started.wait, 2)
         second = await service.submit(
             room_id="desktop-room",
-            thread_id="thread",
+            thread_id="another-thread",
             event_uid="desktop:second",
             text="second",
             author_id="user",
             author_name="You",
         )
         assert second.superseded_run_id == first.run_id
-        assert executor.interrupts == [("desktop-room", "default")]
+        assert executor.interrupts == [("desktop-room", "thread", "default")]
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if service.store.run_row(second.run_id)["status"] == "settled":
@@ -364,6 +454,141 @@ async def test_new_submit_interrupts_the_superseded_active_turn(tmp_path: Path):
             await asyncio.sleep(0.02)
         assert service.store.run_row(second.run_id)["status"] == "settled"
     finally:
+        service.unsubscribe(token)
+        service.close()
+
+
+@pytest.mark.asyncio
+async def test_different_threads_remain_active_without_superseding_each_other(tmp_path: Path):
+    executor = MultiThreadExecutor()
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "bot_mode": {
+                    "rooms": [
+                        {
+                            "room_id": "agents",
+                            "platform": "discord",
+                            "guild_id": "guild",
+                            "channel_id": "parent",
+                            "controller_profile": "default",
+                            "members": ["default", "coder"],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = BotRoomService(tmp_path, executor=executor)
+    token = service.subscribe(lambda _event: asyncio.sleep(0))
+    try:
+        first = await service.submit(
+            room_id="agents",
+            thread_id="thread-one",
+            event_uid="discord:thread-one",
+            text="first room",
+            author_id="user",
+            author_name="You",
+        )
+        assert await asyncio.to_thread(executor.started["thread-one"].wait, 2)
+        second = await service.submit(
+            room_id="agents",
+            thread_id="thread-two",
+            event_uid="discord:thread-two",
+            text="second room",
+            author_id="user",
+            author_name="You",
+        )
+        assert await asyncio.to_thread(executor.started["thread-two"].wait, 2)
+        assert second.superseded_run_id == ""
+        assert service.store.run_row(first.run_id)["status"] == "running"
+        assert service.store.run_row(second.run_id)["status"] == "running"
+
+        executor.release.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            statuses = {
+                service.store.run_row(first.run_id)["status"],
+                service.store.run_row(second.run_id)["status"],
+            }
+            if statuses == {"settled"}:
+                break
+            await asyncio.sleep(0.02)
+        assert service.store.run_row(first.run_id)["status"] == "settled"
+        assert service.store.run_row(second.run_id)["status"] == "settled"
+    finally:
+        executor.release.set()
+        service.unsubscribe(token)
+        service.close()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_a_discord_thread_waiting_for_a_shared_profile_lane(
+    tmp_path: Path,
+):
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "bot_mode": {
+                    "rooms": [
+                        {
+                            "room_id": "agents",
+                            "platform": "discord",
+                            "guild_id": "guild",
+                            "channel_id": "parent",
+                            "controller_profile": "default",
+                            "members": ["default", "coder"],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    executor = SerializedProfileExecutor()
+    service = BotRoomService(tmp_path, executor=executor)
+    token = service.subscribe(lambda _event: asyncio.sleep(0))
+    try:
+        first = await service.submit(
+            room_id="agents",
+            thread_id="thread-one",
+            event_uid="discord:queued-stop-one",
+            text="first room",
+            author_id="user",
+            author_name="You",
+        )
+        assert await asyncio.to_thread(executor.first_started.wait, 2)
+        second = await service.submit(
+            room_id="agents",
+            thread_id="thread-two",
+            event_uid="discord:queued-stop-two",
+            text="second room",
+            author_id="user",
+            author_name="You",
+        )
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if service.store.run_row(second.run_id)["status"] == "running":
+                break
+            await asyncio.sleep(0.01)
+
+        assert await service.stop("agents", "thread-two") == {
+            "stopped": True,
+            "run_id": second.run_id,
+        }
+        executor.release_first.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if service.store.run_row(first.run_id)["status"] == "settled":
+                break
+            await asyncio.sleep(0.02)
+
+        assert executor.entered
+        assert set(executor.entered) == {"thread-one"}
+        assert service.store.run_row(second.run_id)["status"] == "stopped"
+    finally:
+        executor.release_first.set()
         service.unsubscribe(token)
         service.close()
 

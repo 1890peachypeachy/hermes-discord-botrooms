@@ -28,6 +28,85 @@ def test_terminal_reply_prefers_substantive_history_over_trailing_pass():
     assert _pick_turn_reply(messages, 13) is None
 
 
+@pytest.mark.asyncio
+async def test_discord_threads_use_distinct_hidden_profile_sessions(tmp_path: Path):
+    (tmp_path / "profiles" / "coder").mkdir(parents=True)
+    executor = ProfileWorkerExecutor(tmp_path)
+    executor._workers["coder"] = object()
+    room = BotRoomConfig(
+        room_id="agents",
+        display_name="Agents",
+        platform="discord",
+        channel_id="channel",
+        members=(BotRoomMember("default"), BotRoomMember("coder")),
+    )
+    member = room.members[1]
+    created = []
+
+    async def fake_call(_worker, method, params, timeout=60):
+        if method == "session.status":
+            return {"status": "idle"}
+        if method == "session.list":
+            return {"sessions": []}
+        if method == "session.create":
+            created.append(params)
+            suffix = params["title"].rsplit(" ", 1)[-1]
+            return {
+                "session_id": f"runtime-{suffix}",
+                "stored_session_id": f"stored-{suffix}",
+            }
+        raise AssertionError(method)
+
+    executor._call = fake_call
+    first = await executor.ensure_session(room, member, "thread-one")
+    second = await executor.ensure_session(room, member, "thread-two")
+    repeated = await executor.ensure_session(room, member, "thread-one")
+
+    assert first[1:3] == ("runtime-thread-one", "stored-thread-one")
+    assert second[1:3] == ("runtime-thread-two", "stored-thread-two")
+    assert repeated[1:3] == first[1:3]
+    assert [item["title"] for item in created] == [
+        "Group: agents / Discord thread-one",
+        "Group: agents / Discord thread-two",
+    ]
+    assert created[0]["source"] != created[1]["source"]
+
+
+@pytest.mark.asyncio
+async def test_desktop_thread_ids_keep_the_legacy_shared_hidden_session(tmp_path: Path):
+    (tmp_path / "profiles" / "coder").mkdir(parents=True)
+    executor = ProfileWorkerExecutor(tmp_path)
+    executor._workers["coder"] = object()
+    room = BotRoomConfig(
+        room_id="agents",
+        display_name="Agents",
+        platform="desktop",
+        channel_id="",
+        members=(BotRoomMember("default"), BotRoomMember("coder")),
+    )
+    member = room.members[1]
+    created = []
+
+    async def fake_call(_worker, method, params, timeout=60):
+        if method == "session.status":
+            return {"status": "idle"}
+        if method == "session.list":
+            return {"sessions": []}
+        if method == "session.create":
+            created.append(params)
+            return {"session_id": "runtime", "stored_session_id": "stored"}
+        raise AssertionError(method)
+
+    executor._call = fake_call
+    first = await executor.ensure_session(room, member, "thread-one")
+    second = await executor.ensure_session(room, member, "thread-two")
+
+    assert first[1:3] == ("runtime", "stored")
+    assert second[1:3] == first[1:3]
+    assert len(created) == 1
+    assert created[0]["title"] == "Group: agents"
+
+
 def test_data_attachment_accepts_wrapped_base64_and_sanitizes_the_name(tmp_path: Path):
     encoded = base64.b64encode(b"hello room").decode("ascii")
     wrapped = f"{encoded[:4]}\n{encoded[4:]}"
@@ -106,7 +185,7 @@ async def test_group_session_title_collision_does_not_adopt_an_unrelated_session
         raise AssertionError(method)
 
     executor._call = fake_call
-    _worker, runtime, stored, _result = await executor.ensure_session(room, member)
+    _worker, runtime, stored, _result = await executor.ensure_session(room, member, "thread")
 
     assert (runtime, stored) == ("runtime", "stored")
     assert [method for method, _params in calls] == ["session.list", "session.create"]
@@ -149,7 +228,7 @@ async def test_resumed_room_session_reapplies_room_only_instructions(tmp_path: P
         raise AssertionError(method)
 
     executor._call = fake_call
-    _worker, runtime, stored, _result = await executor.ensure_session(room, member)
+    _worker, runtime, stored, _result = await executor.ensure_session(room, member, "thread")
 
     assert (runtime, stored) == ("runtime", "stored")
     assert [method for method, _params in calls] == ["session.list", "session.resume"]
@@ -202,7 +281,7 @@ async def test_recovery_listens_to_native_auto_continue_without_resubmitting(
 
     worker = AutoContinueWorker()
 
-    async def fake_ensure_session(_room, _member, _stored_hint=""):
+    async def fake_ensure_session(_room, _member, _thread_id, _stored_hint=""):
         return worker, "runtime", "stored", {"auto_continue": {"attempt": 1}}
 
     async def fake_call(_worker, method, params, timeout=60):
@@ -256,7 +335,7 @@ async def test_cancelling_member_turn_joins_its_blocking_event_waiter(tmp_path: 
         members=(BotRoomMember("default"), BotRoomMember("coder")),
     )
 
-    async def fake_ensure_session(_room, _member, _stored_hint=""):
+    async def fake_ensure_session(_room, _member, _thread_id, _stored_hint=""):
         return worker, "runtime", "stored", {}
 
     async def fake_call(_worker, method, _params, timeout=60):
@@ -414,7 +493,7 @@ async def test_recovery_does_not_publish_assistant_history_without_terminal_ledg
     executor._room_store.mark_turn_dispatched(submitted.run_id, member.key)
     calls = []
 
-    async def fake_ensure_session(_room, _member, _stored_hint=""):
+    async def fake_ensure_session(_room, _member, _thread_id, _stored_hint=""):
         assert _stored_hint == "stored"
         return object(), "runtime", "stored", {}
 
@@ -478,7 +557,7 @@ async def test_recovery_fails_closed_for_accepted_turn_without_durable_outcome(
     )
     executor._room_store.mark_turn_dispatched(submitted.run_id, member.key)
 
-    async def fake_ensure_session(_room, _member, _stored_hint=""):
+    async def fake_ensure_session(_room, _member, _thread_id, _stored_hint=""):
         assert _stored_hint == "stored"
         return object(), "runtime", "stored", {}
 
@@ -537,7 +616,7 @@ async def test_recovery_never_replays_a_native_marker_that_was_not_auto_continue
     executor._room_store.mark_turn_dispatched(submitted.run_id, member.key)
     record_turn_start(tmp_path, "stored", "dangerous prompt", attempts=3)
 
-    async def fake_ensure_session(_room, _member, _stored_hint=""):
+    async def fake_ensure_session(_room, _member, _thread_id, _stored_hint=""):
         assert _stored_hint == "stored"
         return object(), "runtime", "stored", {}
 
@@ -625,7 +704,7 @@ async def _run_scripted_turn(tmp_path, monkeypatch, script, *, hard=0.3):
     )
     calls = []
 
-    async def ensure_session(_room, _member, _stored_hint=""):
+    async def ensure_session(_room, _member, _thread_id, _stored_hint=""):
         return worker, "runtime", "stored", {}
 
     async def call(_worker, method, _params, timeout=60):

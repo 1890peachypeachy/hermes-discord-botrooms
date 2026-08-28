@@ -11,8 +11,8 @@ python -m hermes_discord_botrooms.compat --json
 ```
 
 The plugin also recognizes the early in-core Bot Mode bridge. Official Hermes
-`main` does not yet expose the generic versioned hook as of this private-beta
-revision.
+`main` did not expose the generic versioned hook when v0.3.0 beta 1 was
+prepared, so most users of this beta need the exact guarded patch below.
 
 ## Guarded compatibility patch
 
