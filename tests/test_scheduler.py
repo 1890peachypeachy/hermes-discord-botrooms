@@ -25,6 +25,7 @@ class FakeExecutor:
         thread_id,
         stored_session_id="",
         on_blocked=None,
+        on_delta=None,
         recovering=False,
     ):
         self.calls.append((member.profile, prompt, stored_session_id, recovering))

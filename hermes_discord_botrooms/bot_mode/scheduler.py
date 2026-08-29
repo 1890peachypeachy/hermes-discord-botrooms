@@ -41,6 +41,7 @@ class MemberExecutor(Protocol):
         thread_id: str,
         stored_session_id: str = "",
         on_blocked: Callable[[PendingPrompt], Awaitable[None]] | None = None,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
         recovering: bool = False,
     ) -> MemberTurnResult: ...
 
@@ -70,6 +71,15 @@ class RoomRunEngine:
             await self.event_sink({"kind": kind, **payload})
         except Exception:
             logger.exception("Bot Mode event sink failed for %s", kind)
+
+    async def _delta_sink(self, member_key: str, thread_id: str, delta_text: str) -> None:
+        sink = getattr(self, "delta_sink", None)
+        if sink is None:
+            return
+        try:
+            await sink(member_key, thread_id, delta_text)
+        except Exception:
+            logger.exception("Bot Mode delta sink failed for %s", member_key)
 
     async def _blocked(self, pending: PendingPrompt) -> None:
         self.store.set_pending_prompt(pending)
@@ -332,6 +342,9 @@ class RoomRunEngine:
             round=round_number,
         )
         try:
+            async def _delta(text: str, _mk=member.key, _tid=thread_id) -> None:
+                await self._delta_sink(_mk, _tid, text)
+
             result = await self.executor.turn(
                 room,
                 member,
@@ -341,6 +354,7 @@ class RoomRunEngine:
                 thread_id=thread_id,
                 stored_session_id=self.store.session_id(room.room_id, thread_id, member.key),
                 on_blocked=self._blocked,
+                on_delta=_delta,
                 recovering=recovering,
             )
         except Exception as exc:

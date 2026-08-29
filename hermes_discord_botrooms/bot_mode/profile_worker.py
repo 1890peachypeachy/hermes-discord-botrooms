@@ -570,6 +570,7 @@ class ProfileWorkerExecutor:
         thread_id: str,
         stored_session_id: str = "",
         on_blocked: BlockedCallback | None = None,
+        on_delta: Any | None = None,
         recovering: bool = False,
     ) -> MemberTurnResult:
         async with self._lock(member.profile):
@@ -640,6 +641,7 @@ class ProfileWorkerExecutor:
 
             accepted = {
                 "message.complete",
+                "message.delta",
                 "clarify.request",
                 "approval.request",
                 "error",
@@ -781,6 +783,26 @@ class ProfileWorkerExecutor:
                     tool_id = str(payload.get("tool_id") or f"seq:{cursor}")
                     active_tools.add(tool_id)
                     activity_deadline = hard_deadline
+                    continue
+                if event_type == "message.delta":
+                    # In-flight model output for the room's progressive post.
+                    delta_text = str(payload.get("text") or "")
+                    if delta_text and on_delta is not None:
+                        try:
+                            await on_delta(delta_text)
+                        except Exception:
+                            logger.debug(
+                                "Bot Mode on_delta callback failed; continuing turn",
+                                exc_info=True,
+                            )
+                    activity_deadline = (
+                        hard_deadline
+                        if active_tools
+                        else min(
+                            hard_deadline,
+                            time.monotonic() + BASE_TURN_TIMEOUT_SECONDS,
+                        )
+                    )
                     continue
                 if event_type == "tool.complete":
                     tool_id = str(payload.get("tool_id") or "")

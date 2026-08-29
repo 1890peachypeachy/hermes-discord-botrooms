@@ -86,6 +86,31 @@ class BotRoomsMattermostAdapter(base.MattermostAdapter):
             service = get_bot_room_service(root)
             self._botrooms_service = service
             self._botrooms_transport = MattermostRoomTransport(root, service.store)
+            engine = getattr(service, "_engine", None)
+            if engine is not None:
+                transport = self._botrooms_transport
+
+                async def _delta_sink(
+                    member_key: str, thread_id: str, delta_text: str
+                ) -> None:
+                    room = None
+                    for candidate in service.rooms().values():
+                        if candidate.platform == "mattermost":
+                            room = candidate
+                            break
+                    if room is None:
+                        return
+                    member = room.member(member_key)
+                    if member is None:
+                        return
+                    await transport.stream_append(
+                        profile=member.profile,
+                        channel_id=room.channel_id,
+                        thread_id=thread_id,
+                        delta_text=delta_text,
+                    )
+
+                engine.delta_sink = _delta_sink
             self._botrooms_subscription = service.subscribe(
                 self._on_botrooms_event,
                 loop=asyncio.get_running_loop(),
@@ -399,6 +424,9 @@ class BotRoomsMattermostAdapter(base.MattermostAdapter):
                     profile=member.profile,
                     thread_id=thread_id,
                 )
+                if kind != "prompt":
+                    with contextlib.suppress(Exception):
+                        await transport.stream_discard(member.profile, thread_id)
         if kind == "prompt":
             payload = envelope.get("payload") or {}
             prompt_kind = str(envelope.get("prompt_kind") or "")
@@ -433,6 +461,8 @@ class BotRoomsMattermostAdapter(base.MattermostAdapter):
             return
         if kind in {"run.finished", "run.superseded"} and transport is not None:
             await transport.stop_thread_typing(thread_id)
+            with contextlib.suppress(Exception):
+                await transport.stream_discard_thread(thread_id)
 
     @staticmethod
     def _format_room_status(status: dict[str, Any]) -> str:

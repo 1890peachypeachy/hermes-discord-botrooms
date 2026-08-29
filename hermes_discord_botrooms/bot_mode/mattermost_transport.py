@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -74,12 +75,133 @@ def _chunks(text: str) -> list[str]:
     return chunks
 
 
+STREAM_EDIT_MIN_INTERVAL = 1.5  # seconds between progressive post edits
+STREAM_SNIPPET_CHARS = 1100
+
+
+def _stream_snippet(text: str, *, streaming: bool) -> str:
+    """Best-effort progressive view of a member's in-flight reply."""
+
+    value = str(text or "").strip()
+    if not value:
+        return ":hourglass: working…"
+    if len(value) > STREAM_SNIPPET_CHARS:
+        value = value[:STREAM_SNIPPET_CHARS].rstrip() + " …"
+    return f"{value}\n\n_(streaming…)_"
+
+
 class MattermostRoomTransport:
     def __init__(self, root: Path, store: RoomStore):
         self.root = Path(root)
         self.store = store
         self._user_ids: dict[str, str] = {}
         self._typing_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
+        # (profile, thread_id) -> placeholder-post state for progressive edits
+        self._stream_state: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def has_stream(self, profile: str, thread_id: str) -> bool:
+        return (str(profile), str(thread_id)) in self._stream_state
+
+    async def stream_begin(
+        self, *, profile: str, channel_id: str, thread_id: str, text: str = ""
+    ) -> None:
+        """Post the placeholder that progressive edits will update in place."""
+
+        if self.has_stream(profile, thread_id):
+            return
+        base_url, token = _profile_credentials(self.root, profile)
+        if not token:
+            return  # streaming is best-effort; ledger delivery is the contract
+        payload: dict[str, Any] = {
+            "channel_id": channel_id,
+            "message": _stream_snippet(text, streaming=True),
+        }
+        if thread_id:
+            payload["root_id"] = thread_id
+        message_id = ""
+        try:
+            data = await self._request("POST", "/posts", base_url, token, payload=payload)
+            message_id = str(data.get("id") or "")
+        except Exception:
+            logger.exception(
+                "Mattermost Bot Rooms stream placeholder failed profile=%s", profile
+            )
+        self._stream_state[(str(profile), str(thread_id))] = {
+            "message_id": message_id,
+            "base_url": base_url,
+            "token": token,
+            "text": text,
+            "last_edit": time.monotonic(),
+        }
+
+    async def stream_update(
+        self, *, profile: str, thread_id: str, text: str
+    ) -> None:
+        state = self._stream_state.get((str(profile), str(thread_id)))
+        if state is None or not state["message_id"]:
+            return
+        state["text"] = text
+        now = time.monotonic()
+        if now - float(state["last_edit"]) < STREAM_EDIT_MIN_INTERVAL:
+            return  # coalesce; next update or the final patch shows it
+        state["last_edit"] = now
+        try:
+            await self._request(
+                "PUT",
+                f"/posts/{state['message_id']}/patch",
+                state["base_url"],
+                state["token"],
+                payload={"message": _stream_snippet(text, streaming=True)},
+            )
+        except Exception:
+            with contextlib.suppress(Exception):
+                logger.exception(
+                    "Mattermost Bot Rooms stream edit failed profile=%s", profile
+                )
+
+    async def stream_append(
+        self, *, profile: str, channel_id: str, thread_id: str, delta_text: str
+    ) -> None:
+        """Accumulate an incremental delta into the turn's streaming post."""
+
+        key = (str(profile), str(thread_id))
+        state = self._stream_state.get(key)
+        if state is None:
+            await self.stream_begin(
+                profile=profile, channel_id=channel_id, thread_id=thread_id
+            )
+            state = self._stream_state.get(key)
+            if state is None:
+                return
+        state["text"] = str(state.get("text") or "") + delta_text
+        await self.stream_update(profile=profile, thread_id=thread_id, text=state["text"])
+
+    async def stream_discard(self, profile: str, thread_id: str) -> None:
+        """Drop the placeholder without a final message (error/supersede)."""
+
+        state = self._stream_state.pop((str(profile), str(thread_id)), None)
+        if not state or not state["message_id"]:
+            return
+        with contextlib.suppress(Exception):
+            await self._request(
+                "DELETE", f"/posts/{state['message_id']}", state["base_url"], state["token"]
+            )
+
+    async def stream_discard_thread(self, thread_id: str) -> None:
+        """Discard every open stream in a thread (run end / failure)."""
+
+        keys = [key for key in tuple(self._stream_state) if key[1] == str(thread_id)]
+        for profile, _thread in keys:
+            with contextlib.suppress(Exception):
+                await self.stream_discard(profile, _thread)
+
+    def take_stream_post(
+        self, profile: str, thread_id: str
+    ) -> dict[str, Any] | None:
+        """Adopt the placeholder as chunk 0 of the final ledger delivery."""
+
+        state = self._stream_state.pop((str(profile), str(thread_id)), None)
+        return state if state and state.get("message_id") else None
 
     async def _request(
         self,
@@ -297,11 +419,32 @@ class MattermostRoomTransport:
                     chunk_index=index,
                     nonce="",
                 )
+            stream_state = (
+                self.take_stream_post(profile, str(thread_id)) if index == 0 else None
+            )
             try:
-                data = await self._request(
-                    "POST", "/posts", base_url, token, payload=payload
-                )
-                chunk_message_id = str(data.get("id") or "")
+                if stream_state is not None:
+                    # Progressive streaming already posted a placeholder for
+                    # this turn. Adopt it as the delivered chunk-0 post instead
+                    # of creating a second message; patch it to the final text.
+                    try:
+                        await self._request(
+                            "PUT",
+                            f"/posts/{stream_state['message_id']}/patch",
+                            stream_state["base_url"],
+                            stream_state["token"],
+                            payload={"message": chunk},
+                        )
+                        chunk_message_id = str(stream_state["message_id"])
+                    except Exception as exc:
+                        # Placeholder edit failed after adoption — the post
+                        # exists but its content is stale. Treat as ambiguous.
+                        raise AmbiguousMattermostDeliveryError(str(exc)) from exc
+                else:
+                    data = await self._request(
+                        "POST", "/posts", base_url, token, payload=payload
+                    )
+                    chunk_message_id = str(data.get("id") or "")
                 if not chunk_message_id:
                     raise RuntimeError(
                         "Mattermost accepted a room chunk without a post ID"
